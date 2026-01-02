@@ -38,7 +38,7 @@ int strcasecmp_safe(const char *s1, const char *s2);
  * @param dest_size Size of destination buffer
  * @return Number of bytes copied (excluding null terminator)
  */
-size_t strlcpy(char *dest, const char *src, size_t dest_size);
+size_t strlcpy(char *dest, const char *src, size_t dest_size) __attribute__((nonnull(1, 2)));
 
 /**
  * @brief Parse hostname and port from string

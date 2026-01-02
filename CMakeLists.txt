@@ -17,6 +17,9 @@ set(SOURCES
     src/utils.c
     src/config.c
     src/logging.c
+    src/token_auth.c
+    src/conn_pool.c
+    src/metrics.c
     src/ws2socket.c
 )
 

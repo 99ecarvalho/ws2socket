@@ -70,9 +70,69 @@ int server_init(ws_server_t *server, const server_config_t *config)
 
     /* Initialize SSL if needed */
     if (config->use_ssl) {
-        /* TODO: Initialize SSL context */
-        log_debug("SSL configuration: cert=%s, key=%s", 
-                 config->cert_file, config->key_file);
+        log_info("Initializing SSL/TLS context");
+        
+        /* Initialize OpenSSL library */
+        SSL_load_error_strings();
+        SSL_library_init();
+        OpenSSL_add_all_algorithms();
+        
+        /* Create SSL context */
+        const SSL_METHOD *method = TLS_server_method();
+        server->ssl_ctx = SSL_CTX_new(method);
+        if (!server->ssl_ctx) {
+            log_error("Failed to create SSL context");
+            return WS_ESSL;
+        }
+        
+        /* Set SSL options for security */
+        SSL_CTX_set_options(server->ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | 
+                           SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1);
+        SSL_CTX_set_mode(server->ssl_ctx, SSL_MODE_AUTO_RETRY);
+        
+        /* Load certificate file */
+        if (strlen(config->cert_file) > 0) {
+            if (SSL_CTX_use_certificate_file(server->ssl_ctx, config->cert_file, 
+                                            SSL_FILETYPE_PEM) <= 0) {
+                log_error("Failed to load certificate from %s", config->cert_file);
+                SSL_CTX_free(server->ssl_ctx);
+                server->ssl_ctx = NULL;
+                return WS_ESSL;
+            }
+            log_info("Loaded SSL certificate: %s", config->cert_file);
+        } else {
+            log_error("SSL enabled but no certificate file specified");
+            SSL_CTX_free(server->ssl_ctx);
+            server->ssl_ctx = NULL;
+            return WS_EINVAL;
+        }
+        
+        /* Load private key file */
+        if (strlen(config->key_file) > 0) {
+            if (SSL_CTX_use_PrivateKey_file(server->ssl_ctx, config->key_file, 
+                                           SSL_FILETYPE_PEM) <= 0) {
+                log_error("Failed to load private key from %s", config->key_file);
+                SSL_CTX_free(server->ssl_ctx);
+                server->ssl_ctx = NULL;
+                return WS_ESSL;
+            }
+            log_info("Loaded SSL private key: %s", config->key_file);
+        } else {
+            log_error("SSL enabled but no private key file specified");
+            SSL_CTX_free(server->ssl_ctx);
+            server->ssl_ctx = NULL;
+            return WS_EINVAL;
+        }
+        
+        /* Verify private key matches certificate */
+        if (!SSL_CTX_check_private_key(server->ssl_ctx)) {
+            log_error("Private key does not match certificate");
+            SSL_CTX_free(server->ssl_ctx);
+            server->ssl_ctx = NULL;
+            return WS_ESSL;
+        }
+        
+        log_info("SSL/TLS initialized successfully (TLSv1.2+)");
     }
 
     log_info("Server initialized: %s:%u (SSL=%d)", config->listen_host,
@@ -146,8 +206,29 @@ int server_accept_client(ws_server_t *server, int *client_fd,
 
     *client_fd = ret;
 
-    /* TODO: Handle SSL accept */
-    if (ssl_ptr) {
+    /* Handle SSL accept if SSL is enabled */
+    if (ssl_ptr && server->ssl_ctx) {
+        SSL *ssl = SSL_new(server->ssl_ctx);
+        if (!ssl) {
+            log_error("Failed to create SSL structure");
+            close(*client_fd);
+            return WS_ESSL;
+        }
+        
+        SSL_set_fd(ssl, *client_fd);
+        
+        int ssl_ret = SSL_accept(ssl);
+        if (ssl_ret <= 0) {
+            int ssl_err = SSL_get_error(ssl, ssl_ret);
+            log_error("SSL accept failed: error %d", ssl_err);
+            SSL_free(ssl);
+            close(*client_fd);
+            return WS_ESSL;
+        }
+        
+        *ssl_ptr = ssl;
+        log_debug("SSL connection established");
+    } else if (ssl_ptr) {
         *ssl_ptr = NULL;
     }
 

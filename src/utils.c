@@ -55,7 +55,7 @@ size_t strlcpy(char *dest, const char *src, size_t dest_size)
 {
     size_t len = 0;
 
-    if (!dest || !src || dest_size == 0) {
+    if (dest_size == 0) {
         return 0;
     }
 
