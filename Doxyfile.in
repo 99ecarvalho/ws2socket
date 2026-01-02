@@ -1,9 +1,9 @@
 PROJECT_NAME           = "ws2socket"
 PROJECT_NUMBER         = 0.1.0
 PROJECT_BRIEF          = "WebSocket to TCP Socket Proxy"
-OUTPUT_DIRECTORY       = docs
+OUTPUT_DIRECTORY       = @DOXYGEN_OUTPUT_DIR@
 
-INPUT                  = include src
+INPUT                  = @DOXYGEN_INPUT_DIR@/include @DOXYGEN_INPUT_DIR@/src
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.c
 EXCLUDE_PATTERNS       = */test/*
@@ -16,10 +16,10 @@ GENERATE_XML           = NO
 HTML_OUTPUT            = html
 HTML_STYLESHEET        = 
 
-EXTRACT_ALL            = NO
+EXTRACT_ALL            = YES
 EXTRACT_PRIVATE        = YES
 EXTRACT_STATIC         = YES
-EXTRACT_LOCAL_CLASSES  = NO
+EXTRACT_LOCAL_CLASSES  = YES
 EXTRACT_LOCAL_METHODS  = NO
 EXTRACT_PACKAGE        = NO
 
