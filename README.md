@@ -52,11 +52,16 @@ make install
 ```
 
 The binary will be installed to `/usr/local/bin/ws2socket` by default.
+The man page will be installed to `/usr/local/share/man/man1/ws2socket.1`.
 
-### Generating Documentation
+### Viewing Documentation
 
-To generate Doxygen documentation:
+Man page:
+```bash
+man ws2socket
+```
 
+Doxygen API documentation:
 ```bash
 cmake ..
 make docs

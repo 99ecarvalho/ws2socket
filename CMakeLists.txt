@@ -43,6 +43,7 @@ endif()
 
 # Install target
 install(TARGETS ws2socket DESTINATION bin)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/docs/ws2socket.1 DESTINATION share/man/man1)
 
 # Doxygen documentation
 find_package(Doxygen)
