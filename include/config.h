@@ -54,6 +54,8 @@ typedef struct {
     char pid_file[512];
     /** Configuration file path */
     char config_file[512];
+    /** Web root directory for static files (e.g., noVNC) */
+    char web_root[512];
 } app_config_t;
 
 /**

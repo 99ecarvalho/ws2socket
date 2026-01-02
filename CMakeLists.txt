@@ -10,6 +10,8 @@ find_package(OpenSSL REQUIRED)
 # Add source files
 set(SOURCES
     src/websocket.c
+    src/websocket_impl.c
+    src/http_server.c
     src/proxy.c
     src/server.c
     src/utils.c

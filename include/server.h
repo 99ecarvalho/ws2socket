@@ -53,6 +53,18 @@ typedef struct {
     int backlog;
 } server_config_t;
 
+/** Maximum number of HTTP headers */
+#define MAX_HTTP_HEADERS 32
+
+/**
+ * @struct http_header
+ * @brief HTTP header name-value pair
+ */
+typedef struct {
+    char name[128];
+    char value[512];
+} http_header_t;
+
 /**
  * @struct http_request
  * @brief HTTP request information
@@ -66,9 +78,9 @@ typedef struct {
     char path[512];
     /** HTTP version ("HTTP/1.0" or "HTTP/1.1") */
     char version[16];
-    /** Raw header lines */
-    char **headers;
-    /** Number of header lines */
+    /** Headers */
+    http_header_t headers[MAX_HTTP_HEADERS];
+    /** Number of headers */
     int num_headers;
     /** Request body (if any) */
     uint8_t *body;
@@ -95,6 +107,8 @@ typedef struct {
     int num_connections;
     /** Maximum connections reached */
     int max_reached;
+    /** Web root directory for static files */
+    char web_root[512];
 } ws_server_t;
 
 /**

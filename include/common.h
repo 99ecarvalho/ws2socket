@@ -45,6 +45,8 @@
 #define WS_EPROTO -7
 /** Authentication error */
 #define WS_EAUTH -8
+/** Internal error */
+#define WS_EINTERNAL -9
 
 /** @} */
 

@@ -30,6 +30,9 @@
 /** Global server instance */
 static ws_server_t *g_server = NULL;
 
+/** Global application configuration */
+static app_config_t g_config;
+
 /**
  * @brief Signal handler for graceful shutdown
  * 
@@ -60,6 +63,7 @@ static int handle_client(ws_server_t *server, int client_fd,
 {
     websocket_t *ws = NULL;
     proxy_client_t *proxy_client = NULL;
+    http_request_t request;
     char client_addr_str[INET_ADDRSTRLEN + 6];
     int ret;
 
@@ -73,6 +77,33 @@ static int handle_client(ws_server_t *server, int client_fd,
 
     log_info("New client connection from %s", client_addr_str);
 
+    /* Receive HTTP request */
+    ret = server_recv_request(client_fd, &request);
+    if (ret != WS_SUCCESS) {
+        log_error("Failed to receive HTTP request");
+        close(client_fd);
+        return ret;
+    }
+
+    /* Declare external functions from http_server.c */
+    extern int http_is_websocket_upgrade(const http_request_t *request);
+    extern int http_serve_file(int client_fd, const char *web_root, const char *uri_path);
+    extern const char *http_get_header_value(const http_request_t *request, const char *name);
+
+    /* Check if this is a WebSocket upgrade request */
+    if (!http_is_websocket_upgrade(&request)) {
+        /* Serve static file if web_root is set */
+        if (strlen(server->web_root) > 0) {
+            log_info("Serving file: %s", request.path);
+            http_serve_file(client_fd, server->web_root, request.path);
+        } else {
+            const char *response = "HTTP/1.1 426 Upgrade Required\r\n\r\n";
+            socket_send(client_fd, (uint8_t *)response, strlen(response), 0);
+        }
+        close(client_fd);
+        return WS_SUCCESS;
+    }
+
     /* Create WebSocket */
     ws = websocket_create();
     if (!ws) {
@@ -85,6 +116,32 @@ static int handle_client(ws_server_t *server, int client_fd,
     ret = websocket_init(ws, client_fd, ssl);
     if (ret != WS_SUCCESS) {
         log_error("Failed to initialize WebSocket: %d", ret);
+        websocket_destroy(ws);
+        close(client_fd);
+        return ret;
+    }
+
+    /* Perform WebSocket handshake */
+    const char *ws_key = http_get_header_value(&request, "Sec-WebSocket-Key");
+    if (!ws_key) {
+        log_error("Missing Sec-WebSocket-Key header");
+        websocket_destroy(ws);
+        close(client_fd);
+        return WS_EPROTO;
+    }
+
+    /* Build headers array for websocket_accept */
+    const char *headers[MAX_HTTP_HEADERS];
+    for (int i = 0; i < request.num_headers && i < MAX_HTTP_HEADERS; i++) {
+        static char header_lines[MAX_HTTP_HEADERS][640];
+        snprintf(header_lines[i], sizeof(header_lines[i]), "%s: %s",
+                 request.headers[i].name, request.headers[i].value);
+        headers[i] = header_lines[i];
+    }
+
+    ret = websocket_accept(ws, headers, request.num_headers);
+    if (ret != WS_SUCCESS) {
+        log_error("Failed to accept WebSocket: %d", ret);
         websocket_destroy(ws);
         close(client_fd);
         return ret;
@@ -104,14 +161,35 @@ static int handle_client(ws_server_t *server, int client_fd,
     memcpy(&proxy_client->src_addr, addr, sizeof(struct sockaddr_storage));
     proxy_client->src_addr_len = sizeof(struct sockaddr_storage);
 
-    /* TODO: Implement actual proxy functionality */
-    /* 1. Receive HTTP upgrade request */
-    /* 2. Validate token/auth if needed */
-    /* 3. Accept WebSocket connection */
-    /* 4. Connect to target server */
-    /* 5. Start bidirectional proxy */
+    /* Connect to target server */
+    char target_host[256];
+    uint16_t target_port;
+    
+    // Use target from global config (set via command line or config file)
+    if (parse_hostport(g_config.target_host, target_host, 
+                      sizeof(target_host), &target_port) != 0) {
+        log_error("Failed to parse target server");
+        proxy_client_destroy(proxy_client);
+        return WS_EINVAL;
+    }
+    
+    // If no port specified, use target_port
+    if (target_port == 0) {
+        target_port = g_config.target_port;
+    }
 
-    log_debug("Client handler: TODO - implement full proxy chain");
+    ret = proxy_connect_target(proxy_client, target_host, target_port, g_config.server.socket_timeout);
+    if (ret != WS_SUCCESS) {
+        log_error("Failed to connect to target %s:%u", target_host, target_port);
+        proxy_client_destroy(proxy_client);
+        return ret;
+    }
+
+    log_info("WebSocket connection established, proxying to %s:%u", 
+             target_host, target_port);
+
+    /* Start bidirectional proxy */
+    proxy_forward(proxy_client);
 
     /* Cleanup */
     proxy_client_destroy(proxy_client);
@@ -211,36 +289,35 @@ static int daemonize(const char *pid_file)
  */
 int main(int argc, char *argv[])
 {
-    app_config_t config;
     logger_config_t logger_config;
     int ret;
 
     /* Initialize config with defaults */
-    if (config_init_defaults(&config) != WS_SUCCESS) {
+    if (config_init_defaults(&g_config) != WS_SUCCESS) {
         fprintf(stderr, "Failed to initialize configuration\n");
         return EXIT_FAILURE;
     }
 
     /* Parse command-line arguments */
-    if (config_parse_args(argc, argv, &config) != WS_SUCCESS) {
+    if (config_parse_args(argc, argv, &g_config) != WS_SUCCESS) {
         fprintf(stderr, "Invalid arguments\n");
         config_print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
     /* Validate configuration */
-    if (config_validate(&config) != WS_SUCCESS) {
+    if (config_validate(&g_config) != WS_SUCCESS) {
         fprintf(stderr, "Invalid configuration\n");
         return EXIT_FAILURE;
     }
 
     /* Initialize logging */
     memset(&logger_config, 0, sizeof(logger_config));
-    logger_config.level = config.logging.level;
-    logger_config.targets = config.logging.targets;
-    logger_config.logfile = strlen(config.logging.logfile) > 0 ?
-                            config.logging.logfile : NULL;
-    logger_config.syslog_facility = config.logging.syslog_facility;
+    logger_config.level = g_config.logging.level;
+    logger_config.targets = g_config.logging.targets;
+    logger_config.logfile = strlen(g_config.logging.logfile) > 0 ?
+                            g_config.logging.logfile : NULL;
+    logger_config.syslog_facility = g_config.logging.syslog_facility;
 
     if (log_init(&logger_config) != WS_SUCCESS) {
         fprintf(stderr, "Failed to initialize logging\n");
@@ -248,12 +325,12 @@ int main(int argc, char *argv[])
     }
 
     log_info("Starting ws2socket v0.1.0");
-    config_print(&config);
+    config_print(&g_config);
 
     /* Daemonize if requested */
-    if (config.daemonize) {
+    if (g_config.daemonize) {
         log_info("Daemonizing...");
-        if (daemonize(config.pid_file) < 0) {
+        if (daemonize(g_config.pid_file) < 0) {
             log_critical("Failed to daemonize");
             log_shutdown();
             return EXIT_FAILURE;
@@ -261,7 +338,7 @@ int main(int argc, char *argv[])
     }
 
     /* Initialize proxy */
-    if (proxy_init(&config.proxy) != WS_SUCCESS) {
+    if (proxy_init(&g_config.proxy) != WS_SUCCESS) {
         log_critical("Failed to initialize proxy");
         log_shutdown();
         return EXIT_FAILURE;
@@ -276,8 +353,22 @@ int main(int argc, char *argv[])
     }
 
     /* Initialize server */
-    if (server_init(g_server, &config.server) != WS_SUCCESS) {
+    if (server_init(g_server, &g_config.server) != WS_SUCCESS) {
         log_critical("Failed to initialize server");
+        server_destroy(g_server);
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+
+    /* Set web root if specified */
+    if (strlen(g_config.web_root) > 0) {
+        strlcpy(g_server->web_root, g_config.web_root, sizeof(g_server->web_root));
+        log_info("Web root directory: %s", g_server->web_root);
+    }
+
+    /* Start listening */
+    if (server_listen(g_server) != WS_SUCCESS) {
+        log_critical("Failed to start listening");
         server_destroy(g_server);
         log_shutdown();
         return EXIT_FAILURE;

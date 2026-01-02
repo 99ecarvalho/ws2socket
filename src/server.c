@@ -164,12 +164,51 @@ int server_accept_client(ws_server_t *server, int *client_fd,
  */
 int server_recv_request(int client_fd, http_request_t *req)
 {
-    (void)client_fd;
-    (void)req;
-
-    /* TODO: Implement HTTP request parsing */
-    log_debug("server_recv_request: TODO - implement");
-
+    if (!req) {
+        return WS_EINVAL;
+    }
+    
+    // Declare function from http_server.c
+    extern int http_parse_request(const char *request_data, size_t request_len,
+                                 http_request_t *request_out);
+    
+    // Read HTTP request
+    char buffer[16384];
+    ssize_t total = 0;
+    ssize_t n;
+    
+    // Read until we get \r\n\r\n (end of headers)
+    while (total < (ssize_t)sizeof(buffer) - 1) {
+        n = socket_recv(client_fd, (uint8_t *)buffer + total, sizeof(buffer) - total - 1, 0);
+        if (n <= 0) {
+            if (n == 0) {
+                log_debug("Client closed connection during request");
+            } else {
+                log_error("Failed to read HTTP request: %s", strerror(errno));
+            }
+            return WS_ESOCKET;
+        }
+        
+        total += n;
+        buffer[total] = '\0';
+        
+        // Check if we have complete headers
+        if (strstr(buffer, "\r\n\r\n")) {
+            break;
+        }
+    }
+    
+    if (total == 0) {
+        return WS_EPROTO;
+    }
+    
+    // Parse the request
+    if (http_parse_request(buffer, total, req) < 0) {
+        log_error("Failed to parse HTTP request");
+        return WS_EPROTO;
+    }
+    
+    log_debug("HTTP Request: %s %s %s", req->method, req->path, req->version);
     return WS_SUCCESS;
 }
 
@@ -180,10 +219,6 @@ void http_request_free(http_request_t *req)
 {
     if (!req) {
         return;
-    }
-
-    if (req->headers) {
-        free(req->headers);
     }
 
     if (req->body) {
@@ -240,17 +275,6 @@ const char *http_get_header(const http_request_t *req,
 
     /* TODO: Implement header lookup */
     return NULL;
-}
-
-/**
- * @brief Check if request is WebSocket upgrade
- */
-int http_is_websocket_upgrade(const http_request_t *req)
-{
-    (void)req;
-
-    /* TODO: Implement WebSocket detection */
-    return 0;
 }
 
 /**

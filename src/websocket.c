@@ -102,22 +102,29 @@ int websocket_init(websocket_t *ws, int sock_fd, SSL *ssl)
 int websocket_accept(websocket_t *ws, const char **http_headers,
                     int num_headers)
 {
-    /* TODO: Implement full WebSocket handshake according to RFC 6455 */
     if (!ws || !http_headers || num_headers == 0) {
         return WS_EINVAL;
     }
 
-    /* 1. Verify Upgrade header */
-    /* 2. Verify Connection header */
-    /* 3. Extract Sec-WebSocket-Key */
-    /* 4. Generate Sec-WebSocket-Accept response */
-    /* 5. Send HTTP 101 response */
-    /* 6. Set state to OPEN */
-
-    log_debug("WebSocket accept: TODO - implement full handshake");
-    ws->state = WS_STATE_OPEN;
-
-    return WS_SUCCESS;
+    // Extract Sec-WebSocket-Key from headers
+    const char *ws_key = NULL;
+    for (int i = 0; i < num_headers; i++) {
+        if (strncasecmp(http_headers[i], "Sec-WebSocket-Key:", 18) == 0) {
+            ws_key = http_headers[i] + 18;
+            // Skip whitespace
+            while (*ws_key == ' ' || *ws_key == '\t') ws_key++;
+            break;
+        }
+    }
+    
+    if (!ws_key) {
+        log_error("Missing Sec-WebSocket-Key header");
+        return WS_EPROTO;
+    }
+    
+    // Perform handshake (implemented in websocket_impl.c)
+    extern int websocket_do_handshake(websocket_t *ws, const char *sec_key);
+    return websocket_do_handshake(ws, ws_key);
 }
 
 /**
@@ -145,14 +152,9 @@ int websocket_connect(websocket_t *ws, const char *host, uint16_t port,
 ssize_t websocket_send(websocket_t *ws, const uint8_t *data,
                       size_t data_len, uint8_t opcode)
 {
-    /* TODO: Implement frame encoding and masking */
-    (void)ws;
-    (void)data;
-    (void)data_len;
-    (void)opcode;
-
-    log_debug("WebSocket send: TODO - implement frame encoding");
-    return 0;
+    extern ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
+                                       size_t data_len, uint8_t opcode, int fin);
+    return websocket_send_frame(ws, data, data_len, opcode, 1);
 }
 
 /**
@@ -160,13 +162,9 @@ ssize_t websocket_send(websocket_t *ws, const uint8_t *data,
  */
 ssize_t websocket_recv(websocket_t *ws, uint8_t *data, size_t data_len)
 {
-    /* TODO: Implement frame reception and decoding */
-    (void)ws;
-    (void)data;
-    (void)data_len;
-
-    log_debug("WebSocket recv: TODO - implement frame decoding");
-    return 0;
+    extern ssize_t websocket_recv_frame(websocket_t *ws, uint8_t *data_out,
+                                       size_t data_len, uint8_t *opcode_out);
+    return websocket_recv_frame(ws, data, data_len, NULL);
 }
 
 /**
@@ -174,11 +172,11 @@ ssize_t websocket_recv(websocket_t *ws, uint8_t *data, size_t data_len)
  */
 int websocket_ping(websocket_t *ws, const uint8_t *data, size_t data_len)
 {
-    (void)ws;
-    (void)data;
-    (void)data_len;
-
-    log_debug("WebSocket ping: TODO - implement");
+    extern ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
+                                       size_t data_len, uint8_t opcode, int fin);
+    if (websocket_send_frame(ws, data, data_len, WS_OPCODE_PING, 1) < 0) {
+        return WS_ESOCKET;
+    }
     return WS_SUCCESS;
 }
 
@@ -187,11 +185,11 @@ int websocket_ping(websocket_t *ws, const uint8_t *data, size_t data_len)
  */
 int websocket_pong(websocket_t *ws, const uint8_t *data, size_t data_len)
 {
-    (void)ws;
-    (void)data;
-    (void)data_len;
-
-    log_debug("WebSocket pong: TODO - implement");
+    extern ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
+                                       size_t data_len, uint8_t opcode, int fin);
+    if (websocket_send_frame(ws, data, data_len, WS_OPCODE_PONG, 1) < 0) {
+        return WS_ESOCKET;
+    }
     return WS_SUCCESS;
 }
 
@@ -200,11 +198,32 @@ int websocket_pong(websocket_t *ws, const uint8_t *data, size_t data_len)
  */
 int websocket_close(websocket_t *ws, uint16_t code, const char *reason)
 {
-    (void)ws;
-    (void)code;
-    (void)reason;
-
-    log_debug("WebSocket close: TODO - implement");
+    if (!ws) {
+        return WS_EINVAL;
+    }
+    
+    extern ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
+                                       size_t data_len, uint8_t opcode, int fin);
+    
+    uint8_t close_frame[125];
+    size_t frame_len = 0;
+    
+    if (code > 0) {
+        close_frame[frame_len++] = (code >> 8) & 0xFF;
+        close_frame[frame_len++] = code & 0xFF;
+        
+        if (reason) {
+            size_t reason_len = strlen(reason);
+            if (frame_len + reason_len <= sizeof(close_frame)) {
+                memcpy(close_frame + frame_len, reason, reason_len);
+                frame_len += reason_len;
+            }
+        }
+    }
+    
+    websocket_send_frame(ws, close_frame, frame_len, WS_OPCODE_CLOSE, 1);
+    ws->state = WS_STATE_CLOSING;
+    
     return WS_SUCCESS;
 }
 

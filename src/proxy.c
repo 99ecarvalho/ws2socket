@@ -162,7 +162,7 @@ int proxy_connect_target(proxy_client_t *client, const char *target_host,
 int proxy_forward(proxy_client_t *client)
 {
     int ret;
-    fd_set read_set, write_set;
+    fd_set read_set;
     int max_fd;
     struct timeval tv;
 
@@ -170,12 +170,11 @@ int proxy_forward(proxy_client_t *client)
         return WS_EINVAL;
     }
 
-    log_info("Starting proxy for client %u (%s:%u -> %s:%u)", client->client_id,
-            "client", 0, client->target_host, client->target_port);
+    log_info("Starting proxy for client %u (%s:%u)", client->client_id,
+            client->target_host, client->target_port);
 
     while (client->active) {
         FD_ZERO(&read_set);
-        FD_ZERO(&write_set);
 
         /* Add WebSocket socket for reading */
         FD_SET(client->ws->sock_fd, &read_set);
@@ -189,7 +188,7 @@ int proxy_forward(proxy_client_t *client)
         tv.tv_sec = g_proxy_config.socket_timeout;
         tv.tv_usec = 0;
 
-        ret = select(max_fd + 1, &read_set, &write_set, NULL, &tv);
+        ret = select(max_fd + 1, &read_set, NULL, NULL, &tv);
         if (ret < 0) {
             if (errno == EINTR) {
                 continue;
@@ -199,17 +198,31 @@ int proxy_forward(proxy_client_t *client)
         }
 
         if (ret == 0) {
-            /* Timeout */
-            log_debug("Proxy select timeout for client %u", client->client_id);
+            /* Timeout - send ping to keep connection alive */
             continue;
         }
 
-        /* TODO: Handle actual data forwarding */
-        /* For now, just break */
-        break;
+        /* Check WebSocket for data */
+        if (FD_ISSET(client->ws->sock_fd, &read_set)) {
+            ret = proxy_forward_ws_to_tcp(client);
+            if (ret <= 0) {
+                log_info("WebSocket closed for client %u", client->client_id);
+                break;
+            }
+        }
+
+        /* Check target socket for data */
+        if (FD_ISSET(client->target_fd, &read_set)) {
+            ret = proxy_forward_tcp_to_ws(client);
+            if (ret <= 0) {
+                log_info("Target socket closed for client %u", client->client_id);
+                break;
+            }
+        }
     }
 
-    log_info("Proxy forward ended for client %u", client->client_id);
+    log_info("Proxy forward ended for client %u (RX: %zu, TX: %zu)", 
+             client->client_id, client->bytes_received, client->bytes_sent);
     return WS_SUCCESS;
 }
 
@@ -225,12 +238,29 @@ ssize_t proxy_forward_ws_to_tcp(proxy_client_t *client)
         return -1;
     }
 
-    /* TODO: Implement actual forwarding */
-    (void)buffer;
-    (void)received;
-    (void)sent;
+    // Receive WebSocket frame
+    received = websocket_recv(client->ws, buffer, sizeof(buffer));
+    if (received < 0) {
+        log_error("Failed to receive WebSocket data");
+        return -1;
+    }
+    
+    if (received == 0) {
+        // Connection closed
+        return 0;
+    }
 
-    return 0;
+    // Forward to TCP socket
+    sent = socket_send(client->target_fd, buffer, received, 0);
+    if (sent != received) {
+        log_error("Failed to forward data to target");
+        return -1;
+    }
+
+    client->bytes_received += received;
+    log_debug("WS->TCP: forwarded %zd bytes", sent);
+    
+    return sent;
 }
 
 /**
@@ -245,12 +275,29 @@ ssize_t proxy_forward_tcp_to_ws(proxy_client_t *client)
         return -1;
     }
 
-    /* TODO: Implement actual forwarding */
-    (void)buffer;
-    (void)received;
-    (void)sent;
+    // Receive from TCP socket
+    received = socket_recv(client->target_fd, buffer, sizeof(buffer), 0);
+    if (received < 0) {
+        log_error("Failed to receive TCP data");
+        return -1;
+    }
+    
+    if (received == 0) {
+        // Connection closed
+        return 0;
+    }
 
-    return 0;
+    // Forward as WebSocket binary frame
+    sent = websocket_send(client->ws, buffer, received, WS_OPCODE_BINARY);
+    if (sent != received) {
+        log_error("Failed to forward data to WebSocket");
+        return -1;
+    }
+
+    client->bytes_sent += sent;
+    log_debug("TCP->WS: forwarded %zd bytes", sent);
+    
+    return sent;
 }
 
 /**
