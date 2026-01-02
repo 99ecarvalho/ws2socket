@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 
 /**
  * @brief Initialize configuration with defaults
@@ -145,6 +146,18 @@ int config_parse_args(int argc, char *argv[], app_config_t *config)
                 return WS_EINVAL;
             }
             strlcpy(config->pid_file, argv[i], sizeof(config->pid_file));
+        } else if (strcmp(arg, "-w") == 0 || strcmp(arg, "--web-root") == 0) {
+            if (++i >= argc) {
+                log_error("Missing argument for %s", arg);
+                return WS_EINVAL;
+            }
+            strlcpy(config->web_root, argv[i], sizeof(config->web_root));
+        } else if (strcmp(arg, "-f") == 0 || strcmp(arg, "--config") == 0) {
+            if (++i >= argc) {
+                log_error("Missing argument for %s", arg);
+                return WS_EINVAL;
+            }
+            strlcpy(config->config_file, argv[i], sizeof(config->config_file));
         } else {
             log_error("Unknown option: %s", arg);
             return WS_EINVAL;
@@ -159,12 +172,164 @@ int config_parse_args(int argc, char *argv[], app_config_t *config)
  */
 int config_load_file(const char *filename, app_config_t *config)
 {
-    (void)filename;
-    (void)config;
+    FILE *fp;
+    char line[1024];
+    char section[64] = "";
+    char *key, *value, *comment;
+    int line_num = 0;
 
-    /* TODO: Implement INI-style config file parsing */
-    log_debug("config_load_file: TODO - implement");
+    if (!filename || !config) {
+        return WS_EINVAL;
+    }
 
+    fp = fopen(filename, "r");
+    if (!fp) {
+        log_error("Failed to open config file '%s': %s", filename, strerror(errno));
+        return WS_ERROR;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        line_num++;
+
+        /* Remove trailing newline */
+        line[strcspn(line, "\r\n")] = '\0';
+
+        /* Remove comments */
+        comment = strchr(line, '#');
+        if (comment) {
+            *comment = '\0';
+        }
+        comment = strchr(line, ';');
+        if (comment) {
+            *comment = '\0';
+        }
+
+        /* Trim leading whitespace */
+        char *trimmed = line;
+        while (*trimmed && isspace(*trimmed)) {
+            trimmed++;
+        }
+
+        /* Skip empty lines */
+        if (*trimmed == '\0') {
+            continue;
+        }
+
+        /* Trim trailing whitespace */
+        char *end = trimmed + strlen(trimmed) - 1;
+        while (end > trimmed && isspace(*end)) {
+            *end = '\0';
+            end--;
+        }
+
+        /* Check for section header [section] */
+        if (trimmed[0] == '[') {
+            char *section_end = strchr(trimmed, ']');
+            if (section_end) {
+                *section_end = '\0';
+                strlcpy(section, trimmed + 1, sizeof(section));
+                continue;
+            } else {
+                log_warn("Invalid section at line %d: %s", line_num, trimmed);
+                continue;
+            }
+        }
+
+        /* Parse key=value */
+        char *equals = strchr(trimmed, '=');
+        if (!equals) {
+            log_warn("Invalid line %d (no '=' found): %s", line_num, trimmed);
+            continue;
+        }
+
+        *equals = '\0';
+        key = trimmed;
+        value = equals + 1;
+
+        /* Trim key */
+        end = key + strlen(key) - 1;
+        while (end > key && isspace(*end)) {
+            *end = '\0';
+            end--;
+        }
+
+        /* Trim value */
+        while (*value && isspace(*value)) {
+            value++;
+        }
+
+        /* Parse configuration based on section */
+        if (strcmp(section, "server") == 0) {
+            if (strcmp(key, "listen") == 0) {
+                char host[256];
+                uint16_t port;
+                if (parse_hostport(value, host, sizeof(host), &port) == WS_SUCCESS) {
+                    strlcpy(config->server.listen_host, host, sizeof(config->server.listen_host));
+                    if (port > 0) config->server.listen_port = port;
+                }
+            } else if (strcmp(key, "port") == 0) {
+                config->server.listen_port = (uint16_t)atoi(value);
+            } else if (strcmp(key, "cert_file") == 0) {
+                strlcpy(config->server.cert_file, value, sizeof(config->server.cert_file));
+                config->server.use_ssl = 1;
+            } else if (strcmp(key, "key_file") == 0) {
+                strlcpy(config->server.key_file, value, sizeof(config->server.key_file));
+                config->server.use_ssl = 1;
+            } else if (strcmp(key, "max_connections") == 0) {
+                config->server.max_connections = atoi(value);
+            } else if (strcmp(key, "socket_timeout") == 0) {
+                config->server.socket_timeout = atoi(value);
+            } else if (strcmp(key, "web_root") == 0) {
+                strlcpy(config->web_root, value, sizeof(config->web_root));
+            }
+        } else if (strcmp(section, "proxy") == 0) {
+            if (strcmp(key, "target") == 0) {
+                char host[256];
+                uint16_t port;
+                if (parse_hostport(value, host, sizeof(host), &port) == WS_SUCCESS) {
+                    strlcpy(config->target_host, host, sizeof(config->target_host));
+                    config->target_port = port;
+                }
+            } else if (strcmp(key, "buffer_size") == 0) {
+                config->proxy.buffer_size = (size_t)atoi(value);
+            } else if (strcmp(key, "max_connections") == 0) {
+                config->proxy.max_connections = atoi(value);
+            } else if (strcmp(key, "socket_timeout") == 0) {
+                config->proxy.socket_timeout = atoi(value);
+            }
+        } else if (strcmp(section, "logging") == 0) {
+            if (strcmp(key, "level") == 0) {
+                if (strcmp(value, "debug") == 0) config->logging.level = LOG_DEBUG;
+                else if (strcmp(value, "info") == 0) config->logging.level = LOG_INFO;
+                else if (strcmp(value, "warning") == 0) config->logging.level = LOG_WARN;
+                else if (strcmp(value, "error") == 0) config->logging.level = LOG_ERROR;
+                else if (strcmp(value, "critical") == 0) config->logging.level = LOG_CRITICAL;
+            } else if (strcmp(key, "file") == 0) {
+                strlcpy(config->logging.logfile, value, sizeof(config->logging.logfile));
+                config->logging.targets |= LOG_TARGET_FILE;
+            } else if (strcmp(key, "console") == 0) {
+                if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+                    config->logging.targets |= LOG_TARGET_CONSOLE;
+                }
+            } else if (strcmp(key, "syslog") == 0) {
+                if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+                    config->logging.targets |= LOG_TARGET_SYSLOG;
+                }
+            }
+        } else if (strcmp(section, "general") == 0) {
+            if (strcmp(key, "daemon") == 0) {
+                config->daemonize = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
+            } else if (strcmp(key, "pid_file") == 0) {
+                strlcpy(config->pid_file, value, sizeof(config->pid_file));
+            } else if (strcmp(key, "token_file") == 0) {
+                strlcpy(config->token_file, value, sizeof(config->token_file));
+                config->token_auth = 1;
+            }
+        }
+    }
+
+    fclose(fp);
+    log_info("Loaded configuration from '%s'", filename);
     return WS_SUCCESS;
 }
 
@@ -234,6 +399,8 @@ void config_print_usage(const char *program_name)
     printf("  -c, --cert FILE           SSL certificate file\n");
     printf("  -k, --key FILE            SSL private key file\n");
     printf("  -v, --verbose             Verbose output\n");
+    printf("  -w, --web-root DIR        Web root directory for static files (noVNC)\n");
+    printf("  -f, --config FILE         Configuration file path\n");
     printf("  --log-file FILE           Log file path\n");
     printf("  --daemon                  Daemonize process\n");
     printf("  --pid-file FILE           PID file path\n");

@@ -2,7 +2,7 @@
 
 ## Overview
 
-ws2socket is now fully functional with complete WebSocket protocol support and HTTP static file serving, making it perfect for noVNC deployments.
+ws2socket is with complete WebSocket protocol support and HTTP static file serving, making it perfect for noVNC deployments.
 
 ## What's Implemented
 

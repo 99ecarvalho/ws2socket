@@ -132,10 +132,15 @@ static int handle_client(ws_server_t *server, int client_fd,
 
     /* Build headers array for websocket_accept */
     const char *headers[MAX_HTTP_HEADERS];
+    static char header_lines[MAX_HTTP_HEADERS][640];
     for (int i = 0; i < request.num_headers && i < MAX_HTTP_HEADERS; i++) {
-        static char header_lines[MAX_HTTP_HEADERS][640];
-        snprintf(header_lines[i], sizeof(header_lines[i]), "%s: %s",
-                 request.headers[i].name, request.headers[i].value);
+        /* Safely format header line with explicit null termination */
+        int written = snprintf(header_lines[i], sizeof(header_lines[i]), "%s: %s",
+                              request.headers[i].name, request.headers[i].value);
+        if (written >= (int)sizeof(header_lines[i])) {
+            /* Truncation occurred - ensure null termination */
+            header_lines[i][sizeof(header_lines[i]) - 1] = '\0';
+        }
         headers[i] = header_lines[i];
     }
 
@@ -303,6 +308,14 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Invalid arguments\n");
         config_print_usage(argv[0]);
         return EXIT_FAILURE;
+    }
+
+    /* Load configuration file if specified */
+    if (strlen(g_config.config_file) > 0) {
+        if (config_load_file(g_config.config_file, &g_config) != WS_SUCCESS) {
+            fprintf(stderr, "Failed to load configuration file\n");
+            return EXIT_FAILURE;
+        }
     }
 
     /* Validate configuration */

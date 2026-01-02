@@ -1,0 +1,58 @@
+# ws2socket Configuration File Example
+# This is an INI-style configuration file
+# Lines starting with # or ; are comments
+
+[general]
+# Run as daemon in background
+daemon = false
+
+# PID file path (when running as daemon)
+pid_file = /var/run/ws2socket.pid
+
+# Token file for authentication (optional)
+# token_file = /etc/ws2socket/tokens.txt
+
+[server]
+# Listen address and port
+listen = 0.0.0.0:6080
+# Or specify port separately:
+# port = 6080
+
+# SSL/TLS certificate and key files (optional, for wss://)
+# cert_file = /etc/ssl/certs/ws2socket.crt
+# key_file = /etc/ssl/private/ws2socket.key
+
+# Maximum concurrent connections
+max_connections = 100
+
+# Socket timeout in seconds
+socket_timeout = 60
+
+# Web root directory for static files (e.g., noVNC)
+web_root = /usr/share/novnc
+
+[proxy]
+# Default target server (VNC, SSH, etc.)
+target = 127.0.0.1:5901
+
+# Buffer size for data transfer (bytes)
+buffer_size = 16384
+
+# Maximum proxy connections
+max_connections = 50
+
+# Proxy socket timeout in seconds
+socket_timeout = 60
+
+[logging]
+# Log level: debug, info, warning, error, critical
+level = info
+
+# Log to file
+file = /var/log/ws2socket.log
+
+# Log to console (true/false or 1/0)
+console = true
+
+# Log to syslog (true/false or 1/0)
+syslog = false
