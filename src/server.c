@@ -15,6 +15,20 @@
 #include <unistd.h>
 #include <errno.h>
 #include <ctype.h>
+#include <sys/wait.h>
+#include <signal.h>
+
+/**
+ * @brief Signal handler for SIGCHLD to reap zombie processes
+ */
+static void sigchld_handler(int sig)
+{
+    (void)sig;
+    /* Reap all terminated child processes */
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+        /* Child reaped */
+    }
+}
 
 /**
  * @brief Create new WebSocket server instance
@@ -177,6 +191,15 @@ int server_listen(ws_server_t *server)
         close(server->listen_fd);
         server->listen_fd = -1;
         return ret;
+    }
+
+    /* Install SIGCHLD handler to reap zombie processes */
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        log_warn("Failed to install SIGCHLD handler: %s", strerror(errno));
     }
 
     server->running = 1;
@@ -383,11 +406,28 @@ int server_run(ws_server_t *server, client_handler_t handler)
             break;
         }
 
-        /* Handle client */
-        handler(server, client_fd, &client_addr, ssl);
-
-        server->num_connections--;
+        /* Fork to handle client in separate process */
+        pid_t pid = fork();
+        
+        if (pid < 0) {
+            /* Fork failed */
+            log_error("Failed to fork for client: %s", strerror(errno));
+            close(client_fd);
+            server->num_connections--;
+            continue;
+        }
+        
+        if (pid == 0) {
+            /* Child process - handle client */
+            close(server->listen_fd);  /* Child doesn't need listener socket */
+            handler(server, client_fd, &client_addr, ssl);
+            close(client_fd);
+            exit(0);  /* Child exits after handling client */
+        }
+        
+        /* Parent process - close client fd and continue accepting */
         close(client_fd);
+        /* Note: We don't wait for child here to allow concurrent connections */
     }
 
     return WS_SUCCESS;
