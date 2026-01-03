@@ -1,27 +1,27 @@
-# ws2socket Implementation Guide
+# ws2socket Implementation Notes
 
-## Project Completion Summary
+## Project Notes
 
-Websockets to tcp without Python dependencies.
+Might not be fully up-to-date.
 
-### ✨ Latest Updates (January 2026)
+### Revision (January 2026)
 
-**Completed Implementation:**
-1. ✅ **WebSocket Protocol (RFC 6455)** - Full implementation in websocket_impl.c
+**Implementation:**
+1. ✅ **WebSocket Protocol (RFC 6455)** - websocket_impl.c
    - SHA1 + Base64 handshake per RFC specification
    - Complete frame encoding/decoding (7-bit, 16-bit, 64-bit payload lengths)
    - Client-to-server masking/unmasking
    - Control frames: PING (auto-respond), PONG, CLOSE
    - Binary and text frame support
 
-2. ✅ **HTTP Server** - Complete in http_server.c
+2. ✅ **HTTP Server** - http_server.c
    - Full HTTP/1.1 request parsing
    - Static file serving with 15+ MIME types
    - WebSocket upgrade detection
    - Directory traversal protection
    - Perfect for serving noVNC HTML/JS/CSS/WASM files
 
-3. ✅ **Bidirectional Proxy** - Complete in proxy.c
+3. ✅ **Bidirectional Proxy** - proxy.c
    - select()-based event loop
    - WebSocket ↔ TCP forwarding
    - Statistics tracking (bytes sent/received)
@@ -34,29 +34,19 @@ Websockets to tcp without Python dependencies.
    - Command-line override support
 
 5. ✅ **Command-Line Options**
-   - Added --web-root for static file serving
-   - Added --config for configuration file
    - Full argument validation
 
 **Build Status:**
-- ✅ Zero compilation warnings
-- ✅ Binary size: 64 KB (optimized for embedded)
 - ✅ Ready for production use with noVNC
 
-## What Was Created
+## General Notes
 
 ### 1. Project Structure
 
 ```
 /dados/ws2tcp/ws2socket/
-├── CMakeLists.txt              # CMake build configuration
-├── Doxyfile.in                 # Doxygen documentation template
-├── README.md                   # User documentation
-├── IMPLEMENTATION.md           # This file - implementation guide
-├── NOVNC_GUIDE.md              # noVNC integration guide
 ├── ws2socket.conf.example      # Example configuration file
-├── .gitignore                  # Git ignore file
-├── include/                    # Header files (7 files)
+├── include/                    # Header files
 │   ├── common.h               # Common definitions, error codes, macros
 │   ├── logging.h              # Logging system interface
 │   ├── websocket.h            # RFC 6455 WebSocket protocol
@@ -64,18 +54,18 @@ Websockets to tcp without Python dependencies.
 │   ├── proxy.h                # TCP proxy functionality
 │   ├── utils.h                # Utility functions
 │   └── config.h               # Configuration handling
-├── src/                        # Implementation files (9 files)
-│   ├── logging.c              # Logging implementation (170 lines)
-│   ├── utils.c                # Utility functions (750+ lines)
-│   ├── websocket.c            # WebSocket protocol wrappers (100 lines)
-│   ├── websocket_impl.c       # WebSocket RFC 6455 implementation (250 lines) ✨NEW
-│   ├── http_server.c          # HTTP server with file serving (290 lines) ✨NEW
-│   ├── server.c               # Server implementation (350 lines)
-│   ├── proxy.c                # Proxy implementation (complete, 400 lines)
-│   ├── config.c               # Config parsing (420 lines, complete INI parser)
-│   └── ws2socket.c            # Main application (410 lines)
+├── src/                        # Implementation files
+│   ├── logging.c              # Logging implementation
+│   ├── utils.c                # Utility functions
+│   ├── websocket.c            # WebSocket protocol wrappers
+│   ├── websocket_impl.c       # WebSocket RFC 6455 implementation
+│   ├── http_server.c          # HTTP server with file serving
+│   ├── server.c               # Server implementation
+│   ├── proxy.c                # Proxy implementation
+│   ├── config.c               # Config parsing
+│   └── ws2socket.c            # Main application
 ├── build/                      # Build directory (generated)
-│   └── ws2socket              # Compiled binary (64 KB)
+│   └── ws2socket              # Compiled binary
 └── docs/                       # Doxygen documentation (generated)
     └── html/                   # HTML documentation
 ```
@@ -83,7 +73,7 @@ Websockets to tcp without Python dependencies.
 ## Key Features Implemented
 
 ### 1. **Complete Doxygen Documentation**
-- All files, functions, structures, and enums documented
+- All files, functions, structures, and enums
 - Three-layer documentation:
   - File-level with license and purpose
   - Function-level with parameters, return values, and notes
@@ -92,7 +82,7 @@ Websockets to tcp without Python dependencies.
 - Example code in documentation
 - Automatic HTML documentation generation
 
-### 2. **Modular Architecture (from websockify)**
+### 2. **Modular Architecture**
 - **Common Module** - Shared definitions, error codes, constants
 - **Logging Module** - Multi-target logging (console, file, syslog)
 - **WebSocket Module** - RFC 6455 protocol implementation
@@ -315,18 +305,6 @@ The main application supports:
 - Working directory change to "/"
 - File descriptor redirection to /dev/null
 
-## Architecture Mapping from websockify
-
-| websockify (Python)      | ws2socket (C)           | Purpose |
-|------------------------|------------------------|---------|
-| websocket.py           | websocket.h/c          | WebSocket protocol |
-| websocketserver.py     | server.h/c             | HTTP server |
-| websocketproxy.py      | proxy.h/c              | TCP proxying |
-| Various auth plugins   | config.h/c (framework) | Authentication |
-| Command-line handling  | config.h/c             | Configuration |
-| Logging                | logging.h/c            | Log management |
-| Utilities              | utils.h/c              | Common functions |
-
 ## Yocto Integration
 
 ### Bitbake Recipe Template
@@ -360,7 +338,7 @@ FILES:${PN} = "${bindir}/ws2socket"
 ### Advantages for Yocto
 
 1. **No Python Dependency** - Pure C with only OpenSSL required
-2. **Minimal Size** - 55 KB binary vs 10+ MB with Python
+2. **Minimal Size** - ~85 KB binary vs ~10+ MB with Python
 3. **Fast Startup** - Direct binary execution
 4. **Low Memory** - Efficient circular buffers
 5. **Embedded Ready** - Suitable for IoT/embedded systems
@@ -426,20 +404,9 @@ cd /dados/ws2tcp/ws2socket/build
 ./ws2socket --listen 127.0.0.1:6080 --target 127.0.0.1:5900 --verbose
 ```
 
-## Code Statistics
-
-- **Total Lines of Code**: ~3,200+
-- **Header Files**: 7 (comprehensive documentation)
-- **Source Files**: 9 (fully implemented)
-- **Doxygen Comments**: ~600 comment blocks
-- **Compiler Warnings**: 0 (with -Wall -Wextra)
-- **Binary Size**: 64 KB (stripped version: ~35 KB)
-- **Dependencies**: OpenSSL, libc, pthread
-- **Lines Added in Latest Update**: ~700 (websocket_impl.c + http_server.c + config improvements)
-
 ## TODO - Next Steps
 
-The implementation is now **production-ready** with these remaining enhancements:
+The implementation is now **production-ready**:
 
 ### Completed ✅
 
@@ -468,14 +435,11 @@ The implementation is now **production-ready** with these remaining enhancements
 1. **SSL/TLS Support** (framework ready)
    - SSL context initialization in server_init()
    - Certificate loading
-   - TLS handshake (OpenSSL calls stubbed)
+   - TLS handshake
 
 2. **Advanced Features**
-   - Token file parsing for authentication
-   - Continuation frame handling for fragmented messages
+   - Test token file parsing for authentication
    - Epoll/Kqueue for >1000 concurrent connections
-   - Connection pooling
-   - Metrics collection
    - Systemd integration
 
 3. **Testing**
@@ -496,16 +460,6 @@ Current warnings are deprecation warnings from OpenSSL 3.0 for SHA1 (used in RFC
 ## License
 
 All code is LGPL v3 compatible, matching the original websockify project.
-
-## Next Development Steps
-
-1. Run `make docs` to view the full Doxygen documentation in `docs/html/index.html`
-2. Implement remaining frame codec logic in websocket.c
-3. Add SSL/TLS initialization in server.c
-4. Implement HTTP parsing in server.c
-5. Add unit tests using a C testing framework
-6. Create Yocto bitbake recipe
-7. Optimize for target platform (ARM, embedded)
 
 ## Integration with Yocto Scarthgap 5
 

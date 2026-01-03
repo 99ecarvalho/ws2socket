@@ -35,18 +35,12 @@ ws2socket is with complete WebSocket protocol support and HTTP static file servi
    - Logging configuration
    - Daemonization support
 
-### 🟡 Partial Implementation
-
-- **SSL/TLS**: Stubbed but not implemented
-- **Config file parsing**: Function exists but returns TODO
-- **Token authentication**: Configured but not implemented
-
 ## Quick Start with noVNC
 
 ### 1. Download noVNC
 
 ```bash
-git clone https://github.com/novnc/noVNC.git /path/to/novnc
+git clone https://github.com/novnc/noVNC.git ./noVNC
 ```
 
 ### 2. Build ws2socket
@@ -188,31 +182,6 @@ Example `defaults.json`:
 }
 ```
 
-## Adding web-root Option
-
-Currently, web_root is in the config structure but not exposed via command-line. To add it:
-
-### Edit src/config.c
-
-Find the `config_parse_args()` function and add:
-
-```c
-} else if (strcmp(argv[i], "--web-root") == 0) {
-    if (++i >= argc) {
-        fprintf(stderr, "Error: --web-root requires an argument\n");
-        return WS_EINVAL;
-    }
-    strlcpy(config->web_root, argv[i], sizeof(config->web_root));
-```
-
-### Update Help Text
-
-In the help message, add:
-
-```
-  --web-root DIR            Web root directory for static files (noVNC)
-```
-
 ## MIME Types Supported
 
 The HTTP server currently supports these MIME types for noVNC:
@@ -226,7 +195,7 @@ The HTTP server currently supports these MIME types for noVNC:
 - `.gif` → `image/gif`
 - `.svg` → `image/svg+xml`
 - `.ico` → `image/x-icon`
-- `.wasm` → `application/wasm` ⭐ Important for noVNC
+- `.wasm` → `application/wasm`
 - `.ttf` → `font/ttf`
 - `.woff` → `font/woff`
 - `.woff2` → `font/woff2`
@@ -253,16 +222,6 @@ ws2socket
 VNC Server (port 5901)
 ```
 
-## File Structure
-
-Key implementation files:
-
-- **src/websocket_impl.c** (250 lines) - Complete RFC 6455 implementation
-- **src/http_server.c** (290 lines) - HTTP server with file serving
-- **src/proxy.c** - Bidirectional forwarding logic
-- **src/ws2socket.c** - Main application integration
-- **include/server.h** - HTTP request/response structures
-
 ## Testing
 
 ### Test Static File Serving
@@ -276,7 +235,7 @@ Should return the noVNC HTML file.
 ### Test WebSocket Upgrade
 
 ```bash
-# Using websocat (install: cargo install websocat)
+# Using websocat
 websocat ws://localhost:6080/websockify
 ```
 
@@ -329,7 +288,7 @@ sudo systemctl status ws2socket
 
 ### Security Considerations
 
-1. **No SSL/TLS yet**: Current build doesn't have SSL implemented. Use behind nginx/Apache as reverse proxy for HTTPS.
+1. **No SSL/TLS for HTTP**: Current build doesn't have HTTPS implemented.
 
 2. **Nginx Reverse Proxy** (recommended for production):
 
@@ -358,18 +317,13 @@ server {
 
 ### High Priority
 - [ ] Native SSL/TLS support (implement `server_init()` SSL context)
-- [ ] Add `--web-root` command-line option
-- [ ] Configuration file parsing (INI format)
 
 ### Medium Priority
-- [ ] Token-based authentication
-- [ ] Continuation frame handling for large messages
-- [ ] WebSocket compression (permessage-deflate)
+- [ ] Test token-based authentication
 
 ### Low Priority
 - [ ] Connection limits and rate limiting
 - [ ] Health check endpoint
-- [ ] Prometheus metrics export
 
 ## Troubleshooting
 
@@ -408,14 +362,7 @@ netstat -tlnp | grep vnc
 - **select() based**: Handles ~1000 concurrent connections efficiently
 - **No threading**: Single process, event-driven architecture
 
-For high concurrency (>1000 connections), consider implementing epoll/kqueue support.
-
-## Build Information
-
-**Built**: 2025-01-02
-**Compiler**: GCC (Linux)
-**Binary size**: ~64KB
-**Dependencies**: OpenSSL (for SHA1, not yet for SSL/TLS)
+For high concurrency (>1000 connections), we consider implementing epoll/kqueue support.
 
 ## References
 

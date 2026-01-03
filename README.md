@@ -1,6 +1,6 @@
 # ws2socket - WebSocket to TCP Socket Proxy
 
-A high-performance C implementation of a WebSocket to TCP socket proxy, designed for use in Yocto/Embedded Linux environments without Python dependencies.
+A high-performance C implementation of a WebSocket to TCP socket proxy, designed for use with noVNC.
 
 ## Overview
 
@@ -10,8 +10,7 @@ A high-performance C implementation of a WebSocket to TCP socket proxy, designed
 - **SSL/TLS Support** - Secure connections via WSS:// protocol  
 - **Bidirectional Proxy** - Transparent proxying between WebSocket clients and TCP servers
 - **Token-Based Authentication** - Optional token validation for security
-- **Minimal Dependencies** - Only requires OpenSSL and libc
-- **Yocto-Ready** - Suitable for embedded Linux systems via Yocto Scarthgap 5
+- **Minimal Dependencies** - Only requires OpenSSL, zlib and libc
 
 ## Features
 
@@ -31,14 +30,15 @@ A high-performance C implementation of a WebSocket to TCP socket proxy, designed
 - Connection timeouts and keepalive
 - Comprehensive Doxygen documentation
 - CMake build system
-- Zero compilation warnings
+- Prometheus metrics
 
-🟡 **Framework Ready (needs SSL context init):**
+🟡 **Framework Ready:**
 - SSL/TLS encryption (certificate/key loading stubbed)
 
 ## Requirements
 
 - OpenSSL library (libssl-dev)
+- Zlib
 - CMake >= 3.10
 - GCC or Clang compiler
 - Linux system (tested on Yocto/Embedded Linux)
@@ -151,26 +151,26 @@ ws2socket --listen 0.0.0.0:6080 \
 ```
 ws2socket/
 ├── CMakeLists.txt          # CMake build configuration
-├── Doxyfile.in            # Doxygen configuration template
-├── README.md              # This file
-├── include/               # Header files
-│   ├── common.h          # Common definitions and data structures
-│   ├── websocket.h       # WebSocket protocol implementation
-│   ├── server.h          # HTTP/WebSocket server
-│   ├── proxy.h           # TCP proxy functionality
-│   ├── utils.h           # Utility functions
-│   ├── config.h          # Configuration handling
-│   └── logging.h         # Logging system
-├── src/                   # Source files
-│   ├── websocket.c       # WebSocket protocol
-│   ├── server.c          # Server implementation
-│   ├── proxy.c           # Proxy implementation
-│   ├── utils.c           # Utility functions
-│   ├── config.c          # Configuration parsing
-│   ├── logging.c         # Logging implementation
-│   └── ws2socket.c       # Main application
-├── build/                 # Build directory (created by CMake)
-└── docs/                  # Documentation (generated)
+├── Doxyfile.in             # Doxygen configuration template
+├── README.md               # This file
+├── include/                # Header files
+│   ├── common.h            # Common definitions and data structures
+│   ├── websocket.h         # WebSocket protocol implementation
+│   ├── server.h            # HTTP/WebSocket server
+│   ├── proxy.h             # TCP proxy functionality
+│   ├── utils.h             # Utility functions
+│   ├── config.h            # Configuration handling
+│   └── logging.h           # Logging system
+├── src/                    # Source files
+│   ├── websocket.c         # WebSocket protocol
+│   ├── server.c            # Server implementation
+│   ├── proxy.c             # Proxy implementation
+│   ├── utils.c             # Utility functions
+│   ├── config.c            # Configuration parsing
+│   ├── logging.c           # Logging implementation
+│   └── ws2socket.c         # Main application
+├── build/                  # Build directory (created by CMake)
+└── docs/                   # Documentation (generated)
 ```
 
 ### Main Components
@@ -349,20 +349,6 @@ LGPL v3 - See LICENSE file for details
 ## Contributing
 
 This is a complete implementation with Doxygen comments following the original websockify architecture while maintaining C-native design patterns.
-
-## TODO - Future Enhancements
-
-- [x] Complete WebSocket frame encode/decode with masking ✅
-- [x] HTTP request parsing and static file serving ✅
-- [x] Configuration file parsing (INI format) ✅
-- [x] Bidirectional proxy forwarding ✅
-- [ ] Complete SSL/TLS context initialization
-- [ ] Token-based authentication plugins
-- [ ] Epoll/Kqueue multiplexing for better scalability
-- [ ] Connection pooling
-- [ ] Metrics collection
-- [ ] Systemd integration
-- [ ] Man page documentation
 
 ## References
 

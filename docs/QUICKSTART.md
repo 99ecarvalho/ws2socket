@@ -59,37 +59,6 @@ This creates a WebSocket proxy that:
     --target 127.0.0.1:5900
 ```
 
-## Project Structure
-
-```
-ws2socket/
-├── include/              # 7 header files with full Doxygen docs
-│   ├── common.h         # Error codes, macros, data types
-│   ├── logging.h        # Logging interface
-│   ├── websocket.h      # RFC 6455 WebSocket protocol
-│   ├── server.h         # HTTP/WebSocket server
-│   ├── proxy.h          # TCP proxy functionality
-│   ├── utils.h          # 40+ utility functions
-│   └── config.h         # Configuration parsing
-│
-├── src/                  # 7 implementation files
-│   ├── logging.c        # Multi-target logging
-│   ├── utils.c          # Sockets, Base64, SHA1, buffers
-│   ├── websocket.c      # WebSocket protocol stubs
-│   ├── server.c         # Server implementation
-│   ├── proxy.c          # Proxy implementation
-│   ├── config.c         # Config parsing
-│   └── ws2socket.c      # Main application
-│
-├── CMakeLists.txt       # CMake build configuration
-├── Doxyfile.in         # Doxygen config template
-├── README.md           # Full documentation
-├── IMPLEMENTATION.md   # Technical details
-├── QUICKSTART.md       # This file
-├── .gitignore          # Git ignore rules
-└── build/              # Build directory (generated)
-```
-
 ## Key Features
 
 ✅ **RFC 6455 WebSocket Protocol** - Full standards compliance
@@ -177,9 +146,8 @@ Your target server has VNC running on port 5900:
 
 - **Language**: C (C11 standard)
 - **Compiler**: GCC/Clang
-- **Dependencies**: OpenSSL >= 3.0, CMake >= 3.10
-- **Binary Size**: 55 KB (dynamic), ~30 KB (stripped)
-- **Build Time**: < 10 seconds
+- **Dependencies**: OpenSSL >= 3.0, Zlib, CMake >= 3.10
+- **Binary Size**: 85 KB (dynamic), ~79 KB (stripped)
 
 ## Error Codes
 
@@ -221,13 +189,6 @@ ldd build/ws2socket
 
 ## Development
 
-### Code Statistics
-- **Total LoC**: ~2,500+
-- **Functions**: 100+
-- **Structures**: 10+
-- **Error Codes**: 9
-- **Doxygen Comments**: 500+ blocks
-
 ### Coding Standards
 - K&R style with Allman braces
 - Strict warnings: -Wall -Wextra -Wpedantic
@@ -236,13 +197,8 @@ ldd build/ws2socket
 - Consistent error handling
 
 ### Future Enhancements
-1. WebSocket frame codec completion
-2. SSL/TLS handshake implementation
-3. HTTP request parsing
-4. Epoll/Kqueue multiplexing
-5. Connection pooling
-6. Metrics collection
-7. Systemd integration
+1. Epoll/Kqueue multiplexing
+2. Systemd integration
 
 ## Troubleshooting
 
@@ -296,18 +252,4 @@ For issues or questions, refer to:
 - IMPLEMENTATION.md - Technical details
 - Doxygen docs - API reference
 - Source comments - Implementation details
-
-## Summary
-
-You now have a complete C implementation of WebSocket to TCP proxy:
-
-✅ Fully documented with Doxygen
-✅ Builds cleanly with CMake
-✅ No Python dependency
-✅ Ready for Yocto/embedded Linux
-✅ Production-quality code structure
-✅ Extensible architecture
-✅ Thread-safe operations
-
-The binary is ready for deployment in Yocto Scarthgap 5 and other embedded environments.
-
+- 
