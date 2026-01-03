@@ -264,24 +264,32 @@ int proxy_forward(proxy_client_t *client)
     double tx_ratio = client->bytes_sent > 0 ? 
         (double)ws_tx_wire / client->bytes_sent * 100.0 : 100.0;
     
-    /* Log comprehensive disconnect summary (always shown, even in non-verbose mode) */
-    log_info("[Client %u] === Connection Closed ===", client->client_id);
-    log_info("[Client %u]   Duration: %02d:%02d:%02d", client->client_id, hours, minutes, seconds);
-    log_info("[Client %u]   RX: %lu bytes (wire: %lu, compression: %.1f%%)", 
-             client->client_id, 
+    /* Verbose mode: Show detailed stats WITHOUT duration */
+    if (log_get_level() <= LOG_DEBUG) {
+        log_info("[Client %u] === Connection Closed ===", client->client_id);
+        log_info("[Client %u]   RX: %lu bytes (wire: %lu, compression: %.1f%%)", 
+                 client->client_id, 
+                 (unsigned long)client->bytes_received,
+                 (unsigned long)ws_rx_wire,
+                 rx_ratio);
+        log_info("[Client %u]   TX: %lu bytes (wire: %lu, compression: %.1f%%)", 
+                 client->client_id,
+                 (unsigned long)client->bytes_sent,
+                 (unsigned long)ws_tx_wire,
+                 tx_ratio);
+        log_info("[Client %u]   Total: %lu bytes (wire: %lu, saved: %ld bytes)",
+                 client->client_id,
+                 (unsigned long)(client->bytes_received + client->bytes_sent),
+                 (unsigned long)(ws_rx_wire + ws_tx_wire),
+                 (long)((client->bytes_received + client->bytes_sent) - (ws_rx_wire + ws_tx_wire)));
+    }
+    
+    /* Always show session summary with duration (even in non-verbose mode) */
+    log_info("[Client %u] Session ended - Duration: %02d:%02d:%02d, RX: %lu bytes, TX: %lu bytes, Total: %lu bytes",
+             client->client_id, hours, minutes, seconds,
              (unsigned long)client->bytes_received,
-             (unsigned long)ws_rx_wire,
-             rx_ratio);
-    log_info("[Client %u]   TX: %lu bytes (wire: %lu, compression: %.1f%%)", 
-             client->client_id,
              (unsigned long)client->bytes_sent,
-             (unsigned long)ws_tx_wire,
-             tx_ratio);
-    log_info("[Client %u]   Total: %lu bytes (wire: %lu, saved: %ld bytes)",
-             client->client_id,
-             (unsigned long)(client->bytes_received + client->bytes_sent),
-             (unsigned long)(ws_rx_wire + ws_tx_wire),
-             (long)((client->bytes_received + client->bytes_sent) - (ws_rx_wire + ws_tx_wire)));
+             (unsigned long)(client->bytes_received + client->bytes_sent));
     
     return WS_SUCCESS;
 }
