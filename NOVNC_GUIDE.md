@@ -67,6 +67,12 @@ If you don't have one running, start Xvnc or x11vnc:
 Xvnc :1 -geometry 1280x720 -depth 24
 ```
 
+If you prefer x11vnc
+```bash
+# Example with DISPLAY=172.23.128.1:4.0 (default port 5900)
+x11vnc -display $DISPLAY -nopw -noshm -localhost -forever -shared
+```
+
 ### 4. Run ws2socket
 
 ```bash
