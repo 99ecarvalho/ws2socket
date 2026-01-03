@@ -75,7 +75,11 @@ static int handle_client(ws_server_t *server, int client_fd,
     socket_addr_to_string(addr, sizeof(struct sockaddr_storage),
                          client_addr_str, sizeof(client_addr_str));
 
-    log_info("New client connection from %s", client_addr_str);
+    /* Generate unique client ID */
+    static uint32_t next_client_id = 1;
+    uint32_t client_id = __sync_fetch_and_add(&next_client_id, 1);
+
+    log_info("[Client %u] New connection from %s", client_id, client_addr_str);
 
     /* Receive HTTP request */
     ret = server_recv_request(client_fd, &request);
@@ -94,7 +98,7 @@ static int handle_client(ws_server_t *server, int client_fd,
     if (!http_is_websocket_upgrade(&request)) {
         /* Serve static file if web_root is set */
         if (strlen(server->web_root) > 0) {
-            log_info("Serving file: %s", request.path);
+            log_info("[Client %u] Serving file: %s", client_id, request.path);
             http_serve_file(client_fd, server->web_root, request.path);
         } else {
             const char *response = "HTTP/1.1 426 Upgrade Required\r\n\r\n";
@@ -155,14 +159,14 @@ static int handle_client(ws_server_t *server, int client_fd,
     /* Create proxy client */
     proxy_client = proxy_client_create();
     if (!proxy_client) {
-        log_error("Failed to create proxy client");
+        log_error("[Client %u] Failed to create proxy client", client_id);
         websocket_destroy(ws);
         close(client_fd);
         return WS_ENOMEM;
     }
 
     proxy_client->ws = ws;
-    proxy_client->client_id = (uint32_t)(uintptr_t)proxy_client;
+    proxy_client->client_id = client_id;
     memcpy(&proxy_client->src_addr, addr, sizeof(struct sockaddr_storage));
     proxy_client->src_addr_len = sizeof(struct sockaddr_storage);
 
@@ -185,13 +189,13 @@ static int handle_client(ws_server_t *server, int client_fd,
 
     ret = proxy_connect_target(proxy_client, target_host, target_port, g_config.server.socket_timeout);
     if (ret != WS_SUCCESS) {
-        log_error("Failed to connect to target %s:%u", target_host, target_port);
+        log_error("[Client %u] Failed to connect to target %s:%u", client_id, target_host, target_port);
         proxy_client_destroy(proxy_client);
         return ret;
     }
 
-    log_info("WebSocket connection established, proxying to %s:%u", 
-             target_host, target_port);
+    log_info("[Client %u] WebSocket connection established, proxying to %s:%u", 
+             client_id, target_host, target_port);
 
     /* Start bidirectional proxy */
     proxy_forward(proxy_client);

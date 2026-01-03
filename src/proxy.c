@@ -9,6 +9,7 @@
  */
 
 #include "proxy.h"
+#include "conn_pool.h"
 #include "logging.h"
 #include "utils.h"
 #include <stdlib.h>
@@ -17,9 +18,13 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/select.h>
+#include <sys/time.h>
 
 /** Global proxy config */
 static proxy_config_t g_proxy_config = {0};
+
+/** Global connection pool */
+static conn_pool_t *g_conn_pool = NULL;
 
 /**
  * @brief Initialize proxy system
@@ -31,6 +36,14 @@ int proxy_init(const proxy_config_t *config)
     }
 
     memcpy(&g_proxy_config, config, sizeof(proxy_config_t));
+    
+    /* Create connection pool for backend connections */
+    g_conn_pool = conn_pool_create(g_proxy_config.max_connections, 300);
+    if (!g_conn_pool) {
+        log_error("Failed to create connection pool");
+        return WS_ENOMEM;
+    }
+    
     log_info("Proxy initialized: max_connections=%d, buffer_size=%zu",
             g_proxy_config.max_connections, g_proxy_config.buffer_size);
 
@@ -42,6 +55,10 @@ int proxy_init(const proxy_config_t *config)
  */
 int proxy_shutdown(void)
 {
+    if (g_conn_pool) {
+        conn_pool_destroy(g_conn_pool);
+        g_conn_pool = NULL;
+    }
     log_info("Proxy shutdown");
     return WS_SUCCESS;
 }
@@ -123,36 +140,46 @@ int proxy_connect_target(proxy_client_t *client, const char *target_host,
     /* TODO: Implement SSL support */
     (void)use_ssl;
 
-    /* Create socket */
-    client->target_fd = socket_create_tcp(1);
-    if (client->target_fd < 0) {
-        log_error("Failed to create socket to %s:%u", target_host, target_port);
-        return WS_ESOCKET;
-    }
+    /* Try to get connection from pool */
+    if (g_conn_pool && conn_pool_get(g_conn_pool, target_host, target_port, &client->target_fd) == WS_SUCCESS) {
+        log_info("[Client %u] Reused pooled connection to %s:%u (fd=%d)", 
+                client->client_id, target_host, target_port, client->target_fd);
+    } else {
+        /* Create new socket */
+        client->target_fd = socket_create_tcp(1);
+        if (client->target_fd < 0) {
+            log_error("[Client %u] Failed to create socket to %s:%u", 
+                     client->client_id, target_host, target_port);
+            return WS_ESOCKET;
+        }
 
-    /* Set options */
-    if (g_proxy_config.tcp_nodelay) {
-        socket_set_nodelay(client->target_fd, 1);
-    }
+        /* Set options */
+        if (g_proxy_config.tcp_nodelay) {
+            socket_set_nodelay(client->target_fd, 1);
+        }
 
-    if (g_proxy_config.socket_timeout > 0) {
-        socket_set_timeout(client->target_fd, g_proxy_config.socket_timeout);
-    }
+        if (g_proxy_config.socket_timeout > 0) {
+            socket_set_timeout(client->target_fd, g_proxy_config.socket_timeout);
+        }
 
-    /* Connect */
-    ret = socket_connect(client->target_fd, target_host, target_port,
-                        g_proxy_config.socket_timeout);
-    if (ret != WS_SUCCESS) {
-        log_error("Failed to connect to %s:%u", target_host, target_port);
-        close(client->target_fd);
-        client->target_fd = -1;
-        return ret;
+        /* Connect */
+        ret = socket_connect(client->target_fd, target_host, target_port,
+                            g_proxy_config.socket_timeout);
+        if (ret != WS_SUCCESS) {
+            log_error("[Client %u] Failed to connect to %s:%u", 
+                     client->client_id, target_host, target_port);
+            close(client->target_fd);
+            client->target_fd = -1;
+            return ret;
+        }
+        
+        log_info("[Client %u] New connection to %s:%u (fd=%d)", 
+                client->client_id, target_host, target_port, client->target_fd);
     }
 
     strlcpy(client->target_host, target_host, sizeof(client->target_host));
     client->target_port = target_port;
 
-    log_info("Connected to target %s:%u", target_host, target_port);
     return WS_SUCCESS;
 }
 
@@ -170,7 +197,7 @@ int proxy_forward(proxy_client_t *client)
         return WS_EINVAL;
     }
 
-    log_info("Starting proxy for client %u (%s:%u)", client->client_id,
+    log_info("[Client %u] Starting proxy to %s:%u", client->client_id,
             client->target_host, client->target_port);
 
     while (client->active) {
@@ -206,7 +233,7 @@ int proxy_forward(proxy_client_t *client)
         if (FD_ISSET(client->ws->sock_fd, &read_set)) {
             ret = proxy_forward_ws_to_tcp(client);
             if (ret <= 0) {
-                log_info("WebSocket closed for client %u", client->client_id);
+                log_info("[Client %u] WebSocket closed", client->client_id);
                 break;
             }
         }
@@ -215,14 +242,24 @@ int proxy_forward(proxy_client_t *client)
         if (FD_ISSET(client->target_fd, &read_set)) {
             ret = proxy_forward_tcp_to_ws(client);
             if (ret <= 0) {
-                log_info("Target socket closed for client %u", client->client_id);
+                log_info("[Client %u] Target socket closed", client->client_id);
                 break;
             }
         }
     }
 
-    log_info("Proxy forward ended for client %u (RX: %zu, TX: %zu)", 
-             client->client_id, client->bytes_received, client->bytes_sent);
+    /* Calculate connection duration */
+    time_t duration = time(NULL) - client->connect_time;
+    int hours = duration / 3600;
+    int minutes = (duration % 3600) / 60;
+    int seconds = duration % 60;
+    
+    /* Log comprehensive summary (always, not just verbose) */
+    log_info("[Client %u] Connection closed - Duration: %02d:%02d:%02d, RX: %zu bytes, TX: %zu bytes, Total: %zu bytes",
+             client->client_id, hours, minutes, seconds,
+             client->bytes_received, client->bytes_sent,
+             client->bytes_received + client->bytes_sent);
+    
     return WS_SUCCESS;
 }
 
