@@ -284,13 +284,6 @@ int proxy_forward(proxy_client_t *client)
                  (long)((client->bytes_received + client->bytes_sent) - (ws_rx_wire + ws_tx_wire)));
     }
     
-    /* Always show session summary with duration (even in non-verbose mode) */
-    log_info("[Client %u] Session ended - Duration: %02d:%02d:%02d, RX: %lu bytes, TX: %lu bytes, Total: %lu bytes",
-             client->client_id, hours, minutes, seconds,
-             (unsigned long)client->bytes_received,
-             (unsigned long)client->bytes_sent,
-             (unsigned long)(client->bytes_received + client->bytes_sent));
-    
     return WS_SUCCESS;
 }
 

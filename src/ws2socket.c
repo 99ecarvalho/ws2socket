@@ -75,9 +75,9 @@ static int handle_client(ws_server_t *server, int client_fd,
     socket_addr_to_string(addr, sizeof(struct sockaddr_storage),
                          client_addr_str, sizeof(client_addr_str));
 
-    /* Generate unique client ID */
-    static uint32_t next_client_id = 1;
-    uint32_t client_id = __sync_fetch_and_add(&next_client_id, 1);
+    /* Generate unique client ID using PID and timestamp for forked processes */
+    static uint32_t process_counter = 0;
+    uint32_t client_id = (getpid() << 16) | (__sync_fetch_and_add(&process_counter, 1) & 0xFFFF);
 
     log_info("[Client %u] New connection from %s", client_id, client_addr_str);
 
