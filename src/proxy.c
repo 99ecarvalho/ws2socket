@@ -254,11 +254,34 @@ int proxy_forward(proxy_client_t *client)
     int minutes = (duration % 3600) / 60;
     int seconds = duration % 60;
     
-    /* Log comprehensive summary (always, not just verbose) */
-    log_info("[Client %u] Connection closed - Duration: %02d:%02d:%02d, RX: %zu bytes, TX: %zu bytes, Total: %zu bytes",
-             client->client_id, hours, minutes, seconds,
-             client->bytes_received, client->bytes_sent,
-             client->bytes_received + client->bytes_sent);
+    /* Get compressed wire sizes from WebSocket layer */
+    uint64_t ws_rx_wire = client->ws->bytes_received_wire;
+    uint64_t ws_tx_wire = client->ws->bytes_sent_wire;
+    
+    /* Calculate compression ratios */
+    double rx_ratio = client->bytes_received > 0 ? 
+        (double)ws_rx_wire / client->bytes_received * 100.0 : 100.0;
+    double tx_ratio = client->bytes_sent > 0 ? 
+        (double)ws_tx_wire / client->bytes_sent * 100.0 : 100.0;
+    
+    /* Log comprehensive disconnect summary (always shown, even in non-verbose mode) */
+    log_info("[Client %u] === Connection Closed ===", client->client_id);
+    log_info("[Client %u]   Duration: %02d:%02d:%02d", client->client_id, hours, minutes, seconds);
+    log_info("[Client %u]   RX: %lu bytes (wire: %lu, compression: %.1f%%)", 
+             client->client_id, 
+             (unsigned long)client->bytes_received,
+             (unsigned long)ws_rx_wire,
+             rx_ratio);
+    log_info("[Client %u]   TX: %lu bytes (wire: %lu, compression: %.1f%%)", 
+             client->client_id,
+             (unsigned long)client->bytes_sent,
+             (unsigned long)ws_tx_wire,
+             tx_ratio);
+    log_info("[Client %u]   Total: %lu bytes (wire: %lu, saved: %ld bytes)",
+             client->client_id,
+             (unsigned long)(client->bytes_received + client->bytes_sent),
+             (unsigned long)(ws_rx_wire + ws_tx_wire),
+             (long)((client->bytes_received + client->bytes_sent) - (ws_rx_wire + ws_tx_wire)));
     
     return WS_SUCCESS;
 }
@@ -275,7 +298,7 @@ ssize_t proxy_forward_ws_to_tcp(proxy_client_t *client)
         return -1;
     }
 
-    // Receive WebSocket frame
+    // Receive WebSocket frame (this decompresses automatically)
     received = websocket_recv(client->ws, buffer, sizeof(buffer));
     if (received < 0) {
         log_error("Failed to receive WebSocket data");
@@ -294,8 +317,10 @@ ssize_t proxy_forward_ws_to_tcp(proxy_client_t *client)
         return -1;
     }
 
+    // Track uncompressed bytes (after decompression)
     client->bytes_received += received;
-    log_debug("WS->TCP: forwarded %zd bytes", sent);
+    // Note: compressed size is tracked inside websocket_recv via ws->bytes_received_wire
+    log_debug("[Client %u] WS->TCP: forwarded %zd bytes", client->client_id, sent);
     
     return sent;
 }
@@ -324,15 +349,17 @@ ssize_t proxy_forward_tcp_to_ws(proxy_client_t *client)
         return 0;
     }
 
-    // Forward as WebSocket binary frame
+    // Forward as WebSocket binary frame (this compresses automatically)
     sent = websocket_send(client->ws, buffer, received, WS_OPCODE_BINARY);
     if (sent != received) {
         log_error("Failed to forward data to WebSocket");
         return -1;
     }
 
+    // Track uncompressed bytes (before compression)
     client->bytes_sent += sent;
-    log_debug("TCP->WS: forwarded %zd bytes", sent);
+    // Note: compressed size is tracked inside websocket_send via ws->bytes_sent_wire
+    log_debug("[Client %u] TCP->WS: forwarded %zd bytes", client->client_id, sent);
     
     return sent;
 }

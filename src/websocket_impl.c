@@ -233,34 +233,52 @@ ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
     }
     
     uint8_t frame[MAX_FRAME_SIZE];
+    uint8_t compressed[MAX_FRAME_SIZE];
     size_t frame_len = 0;
+    const uint8_t *payload = data;
+    size_t payload_len = data_len;
+    int rsv1 = 0;
     
-    // Byte 0: FIN + opcode
-    frame[frame_len++] = (fin ? 0x80 : 0x00) | (opcode & 0x0F);
-    
-    // Byte 1: MASK + payload length
-    // Server-to-client frames are NOT masked (MASK=0)
-    if (data_len < 126) {
-        frame[frame_len++] = (uint8_t)data_len;
-    } else if (data_len < 65536) {
-        frame[frame_len++] = 126;
-        frame[frame_len++] = (data_len >> 8) & 0xFF;
-        frame[frame_len++] = data_len & 0xFF;
-    } else {
-        frame[frame_len++] = 127;
-        for (int i = 7; i >= 0; i--) {
-            frame[frame_len++] = (data_len >> (i * 8)) & 0xFF;
+    // Try to compress payload if compression is enabled and opcode is binary/text
+    if (ws->compression_enabled && ws->compression_initialized &&
+        (opcode == WS_OPCODE_BINARY || opcode == WS_OPCODE_TEXT) &&
+        data && data_len > 0) {
+        ssize_t comp_len = websocket_compress_payload(ws, data, data_len, 
+                                                     compressed, sizeof(compressed));
+        if (comp_len > 0 && comp_len < (ssize_t)data_len) {
+            payload = compressed;
+            payload_len = comp_len;
+            rsv1 = 1;  // Set RSV1 bit for compression
+            log_debug("Compressed outgoing payload: %zu -> %zd bytes", data_len, comp_len);
         }
     }
     
-    // Copy payload data
-    if (data && data_len > 0) {
-        if (frame_len + data_len > MAX_FRAME_SIZE) {
-            log_error("Frame too large: %zu bytes", frame_len + data_len);
+    // Byte 0: FIN + RSV1 + opcode
+    frame[frame_len++] = (fin ? 0x80 : 0x00) | (rsv1 ? 0x40 : 0x00) | (opcode & 0x0F);
+    
+    // Byte 1: MASK + payload length
+    // Server-to-client frames are NOT masked (MASK=0)
+    if (payload_len < 126) {
+        frame[frame_len++] = (uint8_t)payload_len;
+    } else if (payload_len < 65536) {
+        frame[frame_len++] = 126;
+        frame[frame_len++] = (payload_len >> 8) & 0xFF;
+        frame[frame_len++] = payload_len & 0xFF;
+    } else {
+        frame[frame_len++] = 127;
+        for (int i = 7; i >= 0; i--) {
+            frame[frame_len++] = (payload_len >> (i * 8)) & 0xFF;
+        }
+    }
+    
+    // Copy payload data (compressed or original)
+    if (payload && payload_len > 0) {
+        if (frame_len + payload_len > MAX_FRAME_SIZE) {
+            log_error("Frame too large: %zu bytes", frame_len + payload_len);
             return -1;
         }
-        memcpy(frame + frame_len, data, data_len);
-        frame_len += data_len;
+        memcpy(frame + frame_len, payload, payload_len);
+        frame_len += payload_len;
     }
     
     // Send the frame
@@ -269,6 +287,9 @@ ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
         log_error("Failed to send WebSocket frame");
         return -1;
     }
+    
+    // Track wire bytes (compressed frame size)
+    ws->bytes_sent_wire += frame_len;
     
     return data_len;
 }
@@ -373,6 +394,9 @@ ssize_t websocket_recv_frame(websocket_t *ws, uint8_t *data_out,
     
     // Decompress payload if RSV1 bit is set (per-message deflate)
     if (rsv1 && payload_len > 0) {
+        // Save original compressed size for wire tracking
+        size_t compressed_size = payload_len;
+        
         // Need a temporary buffer for decompression
         uint8_t decomp_buf[65536];  // 64KB buffer for decompressed data
         ssize_t decomp_len = websocket_decompress_payload(ws, data_out, payload_len, 
@@ -389,10 +413,26 @@ ssize_t websocket_recv_frame(websocket_t *ws, uint8_t *data_out,
             return -1;
         }
         
+        log_debug("Decompressed WebSocket payload: %zu -> %zd bytes", 
+                 compressed_size, decomp_len);
         memcpy(data_out, decomp_buf, decomp_len);
         payload_len = decomp_len;
-        log_debug("Decompressed WebSocket payload: %zd -> %zd bytes", 
-                 (ssize_t)payload_len, decomp_len);
+        
+        // Track wire bytes (original compressed size + header)
+        ws->bytes_received_wire += compressed_size + 2 + (masked ? 4 : 0);
+        if (compressed_size >= 126 && compressed_size < 65536) {
+            ws->bytes_received_wire += 2;
+        } else if (compressed_size >= 65536) {
+            ws->bytes_received_wire += 8;
+        }
+    } else {
+        // No compression - track actual frame size
+        ws->bytes_received_wire += payload_len + 2 + (masked ? 4 : 0);
+        if (payload_len >= 126 && payload_len < 65536) {
+            ws->bytes_received_wire += 2;
+        } else if (payload_len >= 65536) {
+            ws->bytes_received_wire += 8;
+        }
     }
     
     if (opcode_out) {

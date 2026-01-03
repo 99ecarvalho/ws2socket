@@ -68,6 +68,10 @@ typedef struct websocket {
     char *protocol;
     /** Last frame was masked (for validation) */
     uint8_t last_was_masked;
+    /** Total bytes received on wire (compressed) */
+    uint64_t bytes_received_wire;
+    /** Total bytes sent on wire (compressed) */
+    uint64_t bytes_sent_wire;
 } websocket_t;
 
 /**

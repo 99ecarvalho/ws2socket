@@ -130,11 +130,13 @@ void log_message(int level, const char *fmt, ...)
 
     /* Log to console */
     if (g_logger_config->targets & LOG_TARGET_CONSOLE) {
+        flockfile(stderr);  /* Atomic output across processes */
         va_start(args, fmt);
         fprintf(stderr, "[%s] %s: ", timestamp, log_level_name(level));
         vfprintf(stderr, fmt, args);
         fprintf(stderr, "\n");
         va_end(args);
+        funlockfile(stderr);
     }
 
     /* Log to file */

@@ -45,10 +45,14 @@ typedef struct {
     ws_buffer_t recv_buf;
     /** Connection timestamp */
     time_t connect_time;
-    /** Bytes sent to target */
+    /** Bytes sent to target (uncompressed) */
     uint64_t bytes_sent;
-    /** Bytes received from target */
+    /** Bytes received from target (uncompressed) */
     uint64_t bytes_received;
+    /** Bytes sent compressed (WS wire) */
+    uint64_t bytes_sent_compressed;
+    /** Bytes received compressed (WS wire) */
+    uint64_t bytes_received_compressed;
     /** Flag: connection active */
     uint8_t active;
     /** Mutex for thread safety */
