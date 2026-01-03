@@ -46,9 +46,9 @@ typedef struct websocket {
     size_t partial_msg_capacity;
     /** Opcode of the first frame in a fragmented message */
     uint8_t fragmented_opcode;
-    /** Compression enabled flag */
-    uint8_t compression_enabled;
-    /** Compression initialized */
+    /** Enable compression for outgoing frames (TCP→WS direction only) */
+    uint8_t compress_on_send;
+    /** Compression streams initialized for decompression (WS→TCP) */
     uint8_t compression_initialized;
     /** Deflate stream for compression */
     z_stream deflate_stream;

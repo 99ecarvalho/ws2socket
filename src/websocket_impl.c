@@ -86,7 +86,7 @@ static void websocket_cleanup_compression(websocket_t *ws)
 static ssize_t websocket_compress_payload(websocket_t *ws, const uint8_t *data,
                                           size_t data_len, uint8_t *out, size_t out_size)
 {
-    if (!ws || !ws->compression_enabled || !ws->compression_initialized) {
+    if (!ws || !ws->compress_on_send || !ws->compression_initialized) {
         // No compression - just copy
         if (data_len > out_size) return -1;
         memcpy(out, data, data_len);
@@ -161,11 +161,30 @@ static ssize_t websocket_decompress_payload(websocket_t *ws, uint8_t *data,
 
 /**
  * @brief Parse WebSocket key from HTTP headers and perform handshake
+ * @param sec_key The Sec-WebSocket-Key header value
+ * @param http_headers Array of HTTP header strings
+ * @param num_headers Number of headers in array
  */
-int websocket_do_handshake(websocket_t *ws, const char *sec_key)
+int websocket_do_handshake(websocket_t *ws, const char *sec_key,
+                            const char **http_headers, int num_headers)
 {
     if (!ws || !sec_key) {
         return WS_EINVAL;
+    }
+    
+    // Check if client supports permessage-deflate compression
+    int client_supports_compression = 0;
+    if (http_headers && num_headers > 0) {
+        for (int i = 0; i < num_headers; i++) {
+            if (strncasecmp(http_headers[i], "Sec-WebSocket-Extensions:", 25) == 0) {
+                const char *ext = http_headers[i] + 25;
+                if (strstr(ext, "permessage-deflate") != NULL) {
+                    client_supports_compression = 1;
+                    log_debug("Client supports permessage-deflate compression");
+                    break;
+                }
+            }
+        }
     }
     
     // RFC 6455: Concatenate key with magic GUID
@@ -210,13 +229,16 @@ int websocket_do_handshake(websocket_t *ws, const char *sec_key)
     ws->state = WS_STATE_OPEN;
     
     // Initialize compression streams for receiving compressed frames from client
-    // even if we don't compress outgoing data (to avoid overhead with binary VNC protocol)
+    // We always initialize for decompression capability (handling RSV1 bit in incoming frames)
     websocket_init_compression(ws);
     
-    // Note: compression_enabled controls whether we compress outgoing frames
-    // We don't enable it by default for VNC compatibility, but we still need
-    // to handle incoming compressed frames from the client
-    ws->compression_enabled = 0; //FIXME: parse from headers
+    // DECISION: Don't compress outgoing frames for VNC protocol compatibility
+    // Rationale: VNC uses binary protocol that doesn't compress well and adds overhead.
+    //           We will still decompress any incoming compressed frames from the client.
+    // Future: If compression is needed, set compress_on_send=1 and enable the
+    //         websocket_send_frame_FIXME_compressed logic.
+    ws->compress_on_send = 0;  // Disabled for VNC compatibility
+    (void)client_supports_compression;  // Suppress unused warning
     
     return WS_SUCCESS;
 #pragma GCC diagnostic pop
@@ -304,7 +326,7 @@ ssize_t websocket_send_frame_FIXME_compressed(websocket_t *ws, const uint8_t *da
     int rsv1 = 0;
     
     // Try to compress payload if compression is enabled and opcode is binary/text
-    if (ws->compression_enabled && ws->compression_initialized &&
+    if (ws->compress_on_send && ws->compression_initialized &&
         (opcode == WS_OPCODE_BINARY || opcode == WS_OPCODE_TEXT) &&
         data && data_len > 0) {
         ssize_t comp_len = websocket_compress_payload(ws, data, data_len, 

@@ -129,8 +129,9 @@ int websocket_accept(websocket_t *ws, const char **http_headers,
     }
     
     // Perform handshake (implemented in websocket_impl.c)
-    extern int websocket_do_handshake(websocket_t *ws, const char *sec_key);
-    return websocket_do_handshake(ws, ws_key);
+    extern int websocket_do_handshake(websocket_t *ws, const char *sec_key,
+                                      const char **http_headers, int num_headers);
+    return websocket_do_handshake(ws, ws_key, http_headers, num_headers);
 }
 
 /**
