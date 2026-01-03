@@ -127,7 +127,7 @@ static ssize_t websocket_compress_payload(websocket_t *ws, const uint8_t *data,
 static ssize_t websocket_decompress_payload(websocket_t *ws, uint8_t *data,
                                             size_t data_len, uint8_t *out, size_t out_size)
 {
-    if (!ws || !ws->compression_enabled || !ws->compression_initialized) {
+    if (!ws || !ws->compression_initialized) {
         // No decompression - data is already uncompressed
         if (data_len > out_size) return -1;
         if (data != out) {
@@ -209,11 +209,14 @@ int websocket_do_handshake(websocket_t *ws, const char *sec_key)
     log_info("WebSocket handshake completed");
     ws->state = WS_STATE_OPEN;
     
-    // Enable compression
+    // Initialize compression streams for receiving compressed frames from client
+    // even if we don't compress outgoing data (to avoid overhead with binary VNC protocol)
+    websocket_init_compression(ws);
+    
+    // Note: compression_enabled controls whether we compress outgoing frames
+    // We don't enable it by default for VNC compatibility, but we still need
+    // to handle incoming compressed frames from the client
     ws->compression_enabled = 0; //FIXME: parse from headers
-    if (ws->compression_enabled) {
-        websocket_init_compression(ws);
-    }
     
     return WS_SUCCESS;
 #pragma GCC diagnostic pop
