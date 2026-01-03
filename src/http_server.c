@@ -217,9 +217,20 @@ int http_serve_file(int client_fd, const char *web_root, const char *uri_path)
         return -1;
     }
     
+    // Strip query string from path (if present)
+    char path_only[1024];
+    strncpy(path_only, uri_path, sizeof(path_only) - 1);
+    path_only[sizeof(path_only) - 1] = '\0';
+    
+    // Find and remove query string
+    char *query_start = strchr(path_only, '?');
+    if (query_start) {
+        *query_start = '\0';
+    }
+    
     // Build full file path
     char file_path[1024];
-    snprintf(file_path, sizeof(file_path), "%s%s", web_root, uri_path);
+    snprintf(file_path, sizeof(file_path), "%s%s", web_root, path_only);
     
     // If path ends with /, append index.html
     size_t len = strlen(file_path);

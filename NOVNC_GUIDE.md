@@ -71,6 +71,12 @@ If you prefer x11vnc
 ```bash
 # Example with DISPLAY=172.23.128.1:4.0 (default port 5900)
 x11vnc -display $DISPLAY -nopw -noshm -localhost -forever -shared
+
+# Example with DISPLAY=172.23.128.1:4.0 (default port 5900) with password
+mkdir -p ~/.vnc
+x11vnc -storepasswd ~/.vnc/passwd
+chmod 600 ~/.vnc/passwd
+x11vnc -display $DISPLAY -nopw -noshm -localhost -forever -shared -rfbauth ~/.vnc/passwd
 ```
 
 ### 4. Run ws2socket
@@ -92,6 +98,11 @@ Open your browser to:
 http://your-server:6080/vnc.html?host=your-server&port=6080
 ```
 
+Or with auto-connect:
+```
+http://your-server:6080/vnc.html?host=your-server&port=6080&autoconnect=1
+```
+
 ## How It Works
 
 1. **HTTP Request**: Browser requests `/vnc.html` → ws2socket serves from web_root
@@ -100,6 +111,82 @@ http://your-server:6080/vnc.html?host=your-server&port=6080
 4. **Bidirectional Proxy**: ws2socket forwards:
    - WebSocket frames → TCP to VNC server
    - TCP from VNC server → WebSocket frames to browser
+
+## noVNC URL Parameters
+
+The noVNC application supports URL parameters for controlling behavior and pre-configuring connections. Parameters can be passed as query strings or fragments.
+
+### Connection Parameters
+
+- **`host`** - The WebSocket host to connect to (deprecated, use `path`)
+- **`port`** - The WebSocket port to connect to (deprecated, use `path`)
+- **`path`** - The WebSocket URL (preferred method)
+- **`encrypt`** - Use TLS for WebSocket connection (deprecated, use `path`)
+
+### Auto-connect & Reconnection
+
+- **`autoconnect`** - Automatically connect as soon as the page loads (0 or 1)
+  - Example: `?autoconnect=1`
+- **`reconnect`** - Auto-reconnect if connection drops (default: true)
+- **`reconnect_delay`** - Milliseconds to wait before reconnecting
+
+### Session Control
+
+- **`password`** - Password for the VNC server
+- **`shared`** - Allow multiple clients to connect simultaneously (0 or 1)
+- **`view_only`** - Read-only mode, disables keyboard and mouse input (0 or 1)
+- **`repeaterID`** - VNC repeater ID if using a repeater proxy
+
+### Display Options
+
+- **`view_clip`** - Clip display to window or use scrollbars
+- **`resize`** - How to resize remote session: `off`, `scale`, or `remote`
+- **`quality`** - JPEG quality level (0-9, default varies)
+- **`compression`** - Compression level (0-9, default varies)
+
+### Other Options
+
+- **`bell`** - Enable/disable keyboard bell sounds (0 or 1)
+- **`logging`** - Console log level: `error`, `warn`, `info`, or `debug`
+
+### Usage Examples
+
+**Basic connection with auto-connect:**
+```
+http://localhost:6082/vnc.html?host=localhost&port=6082&autoconnect=1
+```
+
+**With multiple options:**
+```
+http://localhost:6082/vnc.html?host=localhost&port=6082&autoconnect=1&shared=1&quality=8
+```
+
+**Using fragment (not sent to server):**
+```
+http://localhost:6082/vnc.html#host=localhost&port=6082&autoconnect=1&view_only=0
+```
+
+**With password:**
+```
+http://localhost:6082/vnc.html?host=localhost&port=6082&autoconnect=1&password=MyPassword
+```
+
+### Configuration Files
+
+Parameters can also be set in configuration files:
+
+- **`defaults.json`** - Default settings (user can override)
+- **`mandatory.json`** - Mandatory settings (user cannot change)
+
+Example `defaults.json`:
+```json
+{
+    "autoconnect": true,
+    "reconnect": true,
+    "shared": false,
+    "quality": 8
+}
+```
 
 ## Adding web-root Option
 
