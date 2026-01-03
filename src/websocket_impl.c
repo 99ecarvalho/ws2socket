@@ -235,6 +235,65 @@ ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
     }
     
     uint8_t frame[MAX_FRAME_SIZE];
+    size_t frame_len = 0;
+    
+    // Byte 0: FIN + opcode
+    frame[frame_len++] = (fin ? 0x80 : 0x00) | (opcode & 0x0F);
+    
+    // Byte 1: MASK + payload length
+    // Server-to-client frames are NOT masked (MASK=0)
+    if (data_len < 126) {
+        frame[frame_len++] = (uint8_t)data_len;
+    } else if (data_len < 65536) {
+        frame[frame_len++] = 126;
+        frame[frame_len++] = (data_len >> 8) & 0xFF;
+        frame[frame_len++] = data_len & 0xFF;
+    } else {
+        frame[frame_len++] = 127;
+        for (int i = 7; i >= 0; i--) {
+            frame[frame_len++] = (data_len >> (i * 8)) & 0xFF;
+        }
+    }
+    
+    // Copy payload data
+    if (data && data_len > 0) {
+        if (frame_len + data_len > MAX_FRAME_SIZE) {
+            log_error("Frame too large: %zu bytes", frame_len + data_len);
+            return -1;
+        }
+        memcpy(frame + frame_len, data, data_len);
+        frame_len += data_len;
+    }
+    
+    // Send the frame
+    ssize_t sent = socket_send(ws->sock_fd, frame, frame_len, 0);
+    if (sent != (ssize_t)frame_len) {
+        log_error("Failed to send WebSocket frame");
+        return -1;
+    }
+
+    // Track wire bytes (compressed frame size)
+    ws->bytes_sent_wire += frame_len;
+
+    return data_len;
+}
+
+/**
+ * @brief Encode and send a WebSocket frame
+ */
+ssize_t websocket_send_frame_FIXME_compressed(websocket_t *ws, const uint8_t *data,
+                             size_t data_len, uint8_t opcode, int fin)
+{
+    if (!ws || ws->sock_fd < 0) {
+        return -1;
+    }
+    
+    if (ws->state != WS_STATE_OPEN) {
+        log_warn("Attempt to send on non-open WebSocket");
+        return -1;
+    }
+    
+    uint8_t frame[MAX_FRAME_SIZE];
     uint8_t compressed[MAX_FRAME_SIZE];
     size_t frame_len = 0;
     const uint8_t *payload = data;
