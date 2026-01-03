@@ -210,8 +210,10 @@ int websocket_do_handshake(websocket_t *ws, const char *sec_key)
     ws->state = WS_STATE_OPEN;
     
     // Enable compression
-    ws->compression_enabled = 1;
-    websocket_init_compression(ws);
+    ws->compression_enabled = 0; //FIXME: parse from headers
+    if (ws->compression_enabled) {
+        websocket_init_compression(ws);
+    }
     
     return WS_SUCCESS;
 #pragma GCC diagnostic pop
