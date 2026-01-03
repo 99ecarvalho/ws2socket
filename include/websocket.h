@@ -19,6 +19,7 @@
 
 #include "common.h"
 #include <openssl/ssl.h>
+#include <zlib.h>
 
 /**
  * @struct websocket
@@ -41,6 +42,18 @@ typedef struct websocket {
     uint8_t *partial_msg;
     /** Length of partial message */
     size_t partial_msg_len;
+    /** Allocated size of partial message buffer */
+    size_t partial_msg_capacity;
+    /** Opcode of the first frame in a fragmented message */
+    uint8_t fragmented_opcode;
+    /** Compression enabled flag */
+    uint8_t compression_enabled;
+    /** Compression initialized */
+    uint8_t compression_initialized;
+    /** Deflate stream for compression */
+    z_stream deflate_stream;
+    /** Inflate stream for decompression */
+    z_stream inflate_stream;
     /** Close code (when closed) */
     uint16_t close_code;
     /** Close reason (when closed) */

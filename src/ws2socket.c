@@ -387,14 +387,6 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Start listening */
-    if (server_listen(g_server) != WS_SUCCESS) {
-        log_critical("Failed to start listening");
-        server_destroy(g_server);
-        log_shutdown();
-        return EXIT_FAILURE;
-    }
-
     /* Setup signal handlers */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);

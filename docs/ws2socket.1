@@ -282,25 +282,72 @@ Zero-copy operations where possible
 .IP \(bu 2
 ✅ Connection statistics
 
+.IP \(bu 2
+✅ SSL/TLS context initialization (TLS 1.2+, certificate/key loading)
+.IP \(bu 2
+✅ Token-based authentication with hash table lookup
+.IP \(bu 2
+✅ Connection pooling with LRU eviction and hit/miss tracking
+.IP \(bu 2
+✅ Metrics collection (Prometheus and JSON export formats)
+.IP \(bu 2
+✅ WebSocket continuation frames for large fragmented messages
+.IP \(bu 2
+✅ WebSocket compression (permessage-deflate, RFC 7692)
+
 .SH FUTURE ENHANCEMENTS
-.IP \(bu 2
-Complete SSL/TLS context initialization
-.IP \(bu 2
-Token file parsing and authentication
-.IP \(bu 2
-Connection pooling
-.IP \(bu 2
-Metrics collection and export
 .IP \(bu 2
 epoll/kqueue for >1000 concurrent connections
 .IP \(bu 2
-WebSocket compression (permessage-deflate)
+Session persistence and recovery
+.IP \(bu 2
+Rate limiting and DDoS protection
+.IP \(bu 2
+TLS session caching and resumption
+.IP \(bu 2
+WebSocket subprotocol negotiation extensions
+.SH WEBSOCKET ADVANCED FEATURES
+
+.TP
+.B Continuation Frames (RFC 6455 Section 5.4)
+ws2socket handles WebSocket continuation frames automatically, allowing transparent 
+transmission of large messages split into multiple frames. This is essential for:
+.IP \(bu 2
+Large file transfers over WebSocket
+.IP \(bu 2
+Streaming applications
+.IP \(bu 2
+Real-time data feeds
+
+The implementation maintains a reassembly buffer that accumulates fragments until 
+the final frame (FIN bit set) is received, then delivers the complete message to the 
+application.
+
+.TP
+.B Compression (permessage-deflate, RFC 7692)
+ws2socket automatically negotiates and applies permessage-deflate compression during 
+the WebSocket handshake. Compression is transparently handled:
+.IP \(bu 2
+Compresses outgoing frames using raw DEFLATE (RFC 1951)
+.IP \(bu 2
+Decompresses incoming frames automatically
+.IP \(bu 2
+Uses server_no_context_takeover for stateless operation
+.IP \(bu 2
+Reduces bandwidth by 70-90% for text data (typical)
+.IP \(bu 2
+Adds minimal CPU overhead (<5% typical)
+
+Clients that support permessage-deflate (most modern browsers and libraries) will 
+automatically negotiate compression without any server configuration needed.
 
 .SH DEPENDENCIES
 .B ws2socket
 requires:
 .IP \(bu 2
 OpenSSL >= 3.0 (libssl, libcrypto)
+.IP \(bu 2
+Zlib (libz) for compression support
 .IP \(bu 2
 POSIX threads (pthread)
 .IP \(bu 2

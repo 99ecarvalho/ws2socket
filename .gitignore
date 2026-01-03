@@ -23,3 +23,4 @@ docs/latex/
 .clang-format.bak
 compile_commands.json
 .ccls-cache/
+noVNC/

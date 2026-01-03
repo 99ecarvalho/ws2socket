@@ -64,6 +64,12 @@ void websocket_destroy(websocket_t *ws)
     if (ws->partial_msg) {
         free(ws->partial_msg);
     }
+    
+    // Cleanup compression streams
+    if (ws->compression_initialized) {
+        deflateEnd(&ws->deflate_stream);
+        inflateEnd(&ws->inflate_stream);
+    }
 
     if (ws->close_reason) {
         free(ws->close_reason);

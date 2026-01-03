@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Find required packages
 find_package(OpenSSL REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Add source files
 set(SOURCES
@@ -32,6 +33,7 @@ target_link_libraries(ws2socket
         OpenSSL::SSL 
         OpenSSL::Crypto
         pthread
+        ZLIB::ZLIB
 )
 
 # Include directories
