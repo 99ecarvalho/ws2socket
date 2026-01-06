@@ -1,10 +1,10 @@
 /**
  * @file websocket.c
  * @brief WebSocket Protocol Implementation
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * RFC 6455 WebSocket Protocol implementation
+ *
  * License: LGPL v3
  */
 

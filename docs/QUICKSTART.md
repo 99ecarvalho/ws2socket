@@ -79,7 +79,7 @@ Add to your Yocto meta-layer:
 **recipes-websocket/ws2socket/ws2socket_0.1.0.bb**:
 ```bitbake
 SUMMARY = "WebSocket to TCP Socket Proxy"
-LICENSE = "LGPL-3.0-only"
+LICENSE = "LGPL v3-only"
 DEPENDS = "openssl"
 SRC_URI = "file://ws2socket"
 inherit cmake

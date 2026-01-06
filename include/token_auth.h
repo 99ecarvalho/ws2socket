@@ -1,8 +1,7 @@
 /**
  * @file token_auth.h
  * @brief Token-based Authentication
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Provides token-based authentication similar to websockify Python implementation.
  * Supports token files with format: token: host:port

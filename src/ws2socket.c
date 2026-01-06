@@ -1,8 +1,7 @@
 /**
  * @file ws2socket.c
  * @brief Main WebSocket to TCP Socket Proxy Application
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Entry point for the ws2socket application.
  * Handles server initialization, client connections, and shutdown.

@@ -1,8 +1,7 @@
 /**
  * @file metrics.h
  * @brief Metrics Collection and Export
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Collects and exports metrics in Prometheus format.
  * 

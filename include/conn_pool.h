@@ -1,8 +1,7 @@
 /**
  * @file conn_pool.h
  * @brief Connection Pooling
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Manages a pool of reusable connections to reduce connection overhead.
  * 

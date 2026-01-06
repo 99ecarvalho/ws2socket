@@ -1,6 +1,9 @@
 /**
  * @file metrics.c
  * @brief Metrics Collection Implementation
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
+ * 
+ * License: LGPL v3
  */
 
 #include "metrics.h"

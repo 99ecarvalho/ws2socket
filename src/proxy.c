@@ -1,10 +1,10 @@
 /**
  * @file proxy.c
  * @brief TCP Proxy Implementation
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Bidirectional proxying between WebSocket and TCP sockets
+ *
  * License: LGPL v3
  */
 

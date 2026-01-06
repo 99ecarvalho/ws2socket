@@ -1,8 +1,7 @@
 /**
  * @file common.h
  * @brief Common definitions and data structures for ws2socket
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * This file contains common definitions, error codes, and shared data
  * structures used throughout the ws2socket project.

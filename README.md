@@ -257,8 +257,7 @@ All code uses comprehensive Doxygen-style documentation:
 /**
  * @file filename.h
  * @brief Short description
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Longer description with details.
  * 
@@ -311,7 +310,7 @@ Custom circular buffer implementation (`ws_buffer_t`) for:
 ```bash
 SUMMARY = "WebSocket to TCP Socket Proxy"
 DESCRIPTION = "A C implementation of WebSocket proxy for embedded Linux"
-LICENSE = "LGPL-3.0-only"
+LICENSE = "LGPL v3-only"
 
 SRC_URI = "git://path/to/ws2socket.git;branch=main"
 

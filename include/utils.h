@@ -1,8 +1,7 @@
 /**
  * @file utils.h
  * @brief Utility functions
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Provides various utility functions including string handling,
  * base64 encoding, SHA1 hashing, and socket utilities.

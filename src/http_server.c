@@ -1,13 +1,14 @@
 /**
  * @file http_server.c
  * @brief HTTP server with static file serving and WebSocket upgrade
- * @author ws2socket
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * HTTP/1.1 server supporting:
  * - Static file serving
  * - WebSocket upgrade
  * - MIME type detection
+ * 
+ * License: LGPL v3
  */
 
 #include "server.h"

@@ -1,8 +1,7 @@
 /**
  * @file server.h
  * @brief HTTP/WebSocket Server
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Implements an HTTP server with WebSocket upgrade support.
  * Handles client connections, SSL/TLS, and request dispatching.

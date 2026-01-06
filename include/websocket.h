@@ -1,8 +1,7 @@
 /**
  * @file websocket.h
  * @brief WebSocket Protocol Implementation (RFC 6455)
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Implements the WebSocket protocol (RFC 6455) with support for:
  * - WebSocket handshake (client and server)

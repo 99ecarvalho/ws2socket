@@ -1,6 +1,9 @@
 /**
  * @file conn_pool.c
  * @brief Connection Pooling Implementation
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
+ * 
+ * License: LGPL v3
  */
 
 #include "conn_pool.h"

@@ -1,8 +1,7 @@
 /**
  * @file proxy.h
  * @brief TCP Proxy functionality
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Handles bidirectional proxying between WebSocket connections and
  * TCP sockets, including data forwarding and connection management.

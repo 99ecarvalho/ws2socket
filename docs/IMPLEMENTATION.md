@@ -100,8 +100,7 @@ All code follows strict Doxygen formatting:
 /**
  * @file filename.h
  * @brief Short description
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Longer detailed description with implementation notes.
  * 
@@ -312,7 +311,7 @@ The main application supports:
 ```bitbake
 SUMMARY = "WebSocket to TCP Socket Proxy"
 DESCRIPTION = "C implementation of WebSocket proxy for Yocto"
-LICENSE = "LGPL-3.0-only"
+LICENSE = "LGPL v3-only"
 
 SRC_URI = "file://ws2socket"
 

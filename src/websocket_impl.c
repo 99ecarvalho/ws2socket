@@ -1,14 +1,15 @@
 /**
  * @file websocket_impl.c
  * @brief Complete WebSocket Protocol Implementation
- * @author ws2socket
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Full RFC 6455 WebSocket implementation including:
  * - Handshake processing
  * - Frame encoding/decoding
  * - Masking/unmasking
  * - Control frames
+ * 
+ * License: LGPL v3
  */
 
 #include "websocket.h"

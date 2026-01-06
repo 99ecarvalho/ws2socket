@@ -1,8 +1,7 @@
 /**
  * @file config.h
  * @brief Configuration and command-line argument parsing
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Handles configuration file parsing and command-line argument processing
  * for ws2socket.

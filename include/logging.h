@@ -1,8 +1,7 @@
 /**
  * @file logging.h
  * @brief Logging system for ws2socket
- * @author WebSocket to TCP Proxy Project
- * @version 0.1.0
+ * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
  * Provides logging functionality with configurable levels and output targets.
  * Supports syslog and file output.
