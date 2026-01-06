@@ -12,6 +12,13 @@
 #include <string.h>
 #include <time.h>
 
+/**
+ * @brief Initialize metrics
+ * 
+ * Allocates and initializes a metrics structure.
+ * 
+ * @return Pointer to the initialized metrics structure, or NULL on failure.
+ */
 metrics_t *metrics_init(void)
 {
     metrics_t *m = (metrics_t *)calloc(1, sizeof(metrics_t));
@@ -23,6 +30,13 @@ metrics_t *metrics_init(void)
     return m;
 }
 
+/**
+ * @brief Destroy metrics
+ * 
+ * Frees all resources associated with the metrics structure.
+ * 
+ * @param m Pointer to the metrics structure to destroy.
+ */
 void metrics_destroy(metrics_t *m)
 {
     if (!m) return;
@@ -30,6 +44,13 @@ void metrics_destroy(metrics_t *m)
     free(m);
 }
 
+/**
+ * @brief Increment connection counters
+ * 
+ * Increments the total and active connection counters.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
 void metrics_inc_connections(metrics_t *m)
 {
     if (!m) return;
@@ -39,6 +60,13 @@ void metrics_inc_connections(metrics_t *m)
     pthread_mutex_unlock(&m->lock);
 }
 
+/**
+ * @brief Decrement active connection counter
+ * 
+ * Decrements the active connection counter.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
 void metrics_dec_connections(metrics_t *m)
 {
     if (!m) return;
@@ -47,6 +75,13 @@ void metrics_dec_connections(metrics_t *m)
     pthread_mutex_unlock(&m->lock);
 }
 
+/**
+ * @brief Increment failed connection counter
+ * 
+ * Increments the counter for failed connection attempts.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
 void metrics_inc_failed_connections(metrics_t *m)
 {
     if (!m) return;
@@ -55,6 +90,14 @@ void metrics_inc_failed_connections(metrics_t *m)
     pthread_mutex_unlock(&m->lock);
 }
 
+/**
+ * @brief Add bytes sent
+ * 
+ * Adds the specified number of bytes to the total bytes sent counter.
+ * 
+ * @param m Pointer to the metrics structure.
+ * @param bytes Number of bytes sent.
+ */
 void metrics_add_bytes_sent(metrics_t *m, uint64_t bytes)
 {
     if (!m) return;
@@ -63,6 +106,14 @@ void metrics_add_bytes_sent(metrics_t *m, uint64_t bytes)
     pthread_mutex_unlock(&m->lock);
 }
 
+/**
+ * @brief Add bytes received
+ * 
+ * Adds the specified number of bytes to the total bytes received counter.
+ * 
+ * @param m Pointer to the metrics structure.
+ * @param bytes Number of bytes received.
+ */
 void metrics_add_bytes_received(metrics_t *m, uint64_t bytes)
 {
     if (!m) return;
@@ -71,22 +122,14 @@ void metrics_add_bytes_received(metrics_t *m, uint64_t bytes)
     pthread_mutex_unlock(&m->lock);
 }
 
-void metrics_inc_frames_sent(metrics_t *m)
-{
-    if (!m) return;
-    pthread_mutex_lock(&m->lock);
-    m->frames_sent++;
-    pthread_mutex_unlock(&m->lock);
-}
-
-void metrics_inc_frames_received(metrics_t *m)
-{
-    if (!m) return;
-    pthread_mutex_lock(&m->lock);
-    m->frames_received++;
-    pthread_mutex_unlock(&m->lock);
-}
-
+/**
+ * @brief Increment HTTP request counter
+ * 
+ * Increments the HTTP request counter and updates status code counters.
+ * 
+ * @param m Pointer to the metrics structure.
+ * @param status_code HTTP status code.
+ */
 void metrics_inc_http_request(metrics_t *m, int status_code)
 {
     if (!m) return;
@@ -98,6 +141,60 @@ void metrics_inc_http_request(metrics_t *m, int status_code)
     pthread_mutex_unlock(&m->lock);
 }
 
+/**
+ * @brief Record handshake time
+ * 
+ * Records the time taken for a WebSocket handshake.
+ * 
+ * @param m Pointer to the metrics structure.
+ * @param microseconds Time taken in microseconds.
+ */
+void metrics_record_handshake_time(metrics_t *m, uint64_t microseconds)
+{
+    if (!m) return;
+    pthread_mutex_lock(&m->lock);
+    m->handshake_time_total += microseconds;
+    m->handshake_count++;
+    pthread_mutex_unlock(&m->lock);
+}
+
+/**
+ * @brief Increment WebSocket frames sent counter
+ * 
+ * Increments the counter for WebSocket frames sent.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
+void metrics_inc_frames_sent(metrics_t *m)
+{
+    if (!m) return;
+    pthread_mutex_lock(&m->lock);
+    m->frames_sent++;
+    pthread_mutex_unlock(&m->lock);
+}
+
+/**
+ * @brief Increment WebSocket frames received counter
+ * 
+ * Increments the counter for WebSocket frames received.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
+void metrics_inc_frames_received(metrics_t *m)
+{
+    if (!m) return;
+    pthread_mutex_lock(&m->lock);
+    m->frames_received++;
+    pthread_mutex_unlock(&m->lock);
+}
+
+/**
+ * @brief Increment authentication success counter
+ * 
+ * Increments the counter for successful authentication attempts.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
 void metrics_inc_auth_success(metrics_t *m)
 {
     if (!m) return;
@@ -106,20 +203,18 @@ void metrics_inc_auth_success(metrics_t *m)
     pthread_mutex_unlock(&m->lock);
 }
 
+/**
+ * @brief Increment authentication failure counter
+ * 
+ * Increments the counter for failed authentication attempts.
+ * 
+ * @param m Pointer to the metrics structure.
+ */
 void metrics_inc_auth_failure(metrics_t *m)
 {
     if (!m) return;
     pthread_mutex_lock(&m->lock);
     m->auth_failure++;
-    pthread_mutex_unlock(&m->lock);
-}
-
-void metrics_record_handshake_time(metrics_t *m, uint64_t microseconds)
-{
-    if (!m) return;
-    pthread_mutex_lock(&m->lock);
-    m->handshake_time_total += microseconds;
-    m->handshake_count++;
     pthread_mutex_unlock(&m->lock);
 }
 

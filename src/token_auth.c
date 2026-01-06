@@ -118,6 +118,10 @@ static token_entry_t *hash_lookup(token_hash_t *hash, const char *token)
 
 /**
  * @brief Create token authentication manager
+ * 
+ * Initializes a token authentication manager with the specified configuration.
+ * 
+ * @return Pointer to the created token authentication manager, or NULL on failure.
  */
 token_auth_t *token_auth_create(const char *token_file, int auto_reload)
 {
@@ -154,6 +158,10 @@ token_auth_t *token_auth_create(const char *token_file, int auto_reload)
 
 /**
  * @brief Destroy token authentication manager
+ * 
+ * Frees all resources associated with the token authentication manager.
+ * 
+ * @param auth Pointer to the token authentication manager to destroy.
  */
 void token_auth_destroy(token_auth_t *auth)
 {

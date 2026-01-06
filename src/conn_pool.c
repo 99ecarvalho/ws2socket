@@ -14,6 +14,16 @@
 #include <unistd.h>
 #include <time.h>
 
+/**
+ * @brief Create a connection pool
+ * 
+ * Allocates and initializes a connection pool with the specified maximum size
+ * and idle timeout.
+ * 
+ * @param max_size Maximum number of connections in the pool.
+ * @param idle_timeout Timeout for idle connections in seconds.
+ * @return Pointer to the created connection pool, or NULL on failure.
+ */
 conn_pool_t *conn_pool_create(int max_size, int idle_timeout)
 {
     conn_pool_t *pool = (conn_pool_t *)calloc(1, sizeof(conn_pool_t));
@@ -27,6 +37,13 @@ conn_pool_t *conn_pool_create(int max_size, int idle_timeout)
     return pool;
 }
 
+/**
+ * @brief Destroy a connection pool
+ * 
+ * Frees all resources associated with the connection pool.
+ * 
+ * @param pool Pointer to the connection pool to destroy.
+ */
 void conn_pool_destroy(conn_pool_t *pool)
 {
     if (!pool) return;
@@ -46,6 +63,18 @@ void conn_pool_destroy(conn_pool_t *pool)
     free(pool);
 }
 
+/**
+ * @brief Get a connection from the pool
+ * 
+ * Retrieves an existing connection from the pool or creates a new one if none
+ * are available.
+ * 
+ * @param pool Pointer to the connection pool.
+ * @param host Hostname for the connection.
+ * @param port Port number for the connection.
+ * @param fd_out Pointer to store the file descriptor of the connection.
+ * @return WS_SUCCESS on success, or an error code on failure.
+ */
 int conn_pool_get(conn_pool_t *pool, const char *host, uint16_t port, int *fd_out)
 {
     if (!pool || !host || !fd_out) return WS_EINVAL;
@@ -90,6 +119,16 @@ int conn_pool_get(conn_pool_t *pool, const char *host, uint16_t port, int *fd_ou
     return WS_SUCCESS;
 }
 
+/**
+ * @brief Return a connection to the pool
+ * 
+ * Marks a connection as available for reuse or closes it if keep_alive is false.
+ * 
+ * @param pool Pointer to the connection pool.
+ * @param fd File descriptor of the connection.
+ * @param keep_alive Whether to keep the connection alive.
+ * @return WS_SUCCESS on success, or an error code on failure.
+ */
 int conn_pool_put(conn_pool_t *pool, int fd, int keep_alive)
 {
     if (!pool || fd < 0) return WS_EINVAL;
@@ -134,6 +173,14 @@ int conn_pool_put(conn_pool_t *pool, int fd, int keep_alive)
     return WS_SUCCESS;
 }
 
+/**
+ * @brief Clean up idle connections
+ * 
+ * Removes idle connections from the pool that have exceeded the idle timeout.
+ * 
+ * @param pool Pointer to the connection pool.
+ * @return Number of connections removed.
+ */
 int conn_pool_cleanup(conn_pool_t *pool)
 {
     if (!pool) return 0;
@@ -175,6 +222,17 @@ int conn_pool_cleanup(conn_pool_t *pool)
     return removed;
 }
 
+/**
+ * @brief Get connection pool statistics
+ * 
+ * Retrieves statistics about the connection pool, including hits, misses, and
+ * current size.
+ * 
+ * @param pool Pointer to the connection pool.
+ * @param hits Pointer to store the number of pool hits.
+ * @param misses Pointer to store the number of pool misses.
+ * @param size Pointer to store the current pool size.
+ */
 void conn_pool_stats(conn_pool_t *pool, uint64_t *hits, uint64_t *misses, int *size)
 {
     if (!pool) return;
