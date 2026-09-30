@@ -16,11 +16,11 @@ sudo apt-get install build-essential cmake libssl-dev zlib1g-dev
 Doxygen is optional. Install it (`sudo apt-get install doxygen`) if you also
 want the HTML API reference.
 
-## 2. Build
-
-From the root of the source tree:
+## 2. Get the source and build
 
 ```bash
+git clone https://github.com/99ecarvalho/ws2socket.git
+cd ws2socket
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```

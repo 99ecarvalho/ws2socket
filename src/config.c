@@ -412,6 +412,7 @@ void config_print_usage(const char *program_name)
     printf("\nExamples:\n");
     printf("  %s --listen 127.0.0.1:6080 --target 192.168.1.1:5900\n", program_name);
     printf("  %s --cert cert.pem --key key.pem --target example.com:22\n", program_name);
+    printf("\nReport bugs: https://github.com/99ecarvalho/ws2socket/issues\n");
 }
 
 /**

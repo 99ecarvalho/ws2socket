@@ -83,7 +83,9 @@ full list.
 # Dependencies (Debian/Ubuntu)
 sudo apt-get install build-essential cmake libssl-dev zlib1g-dev
 
-# Build
+# Get the source and build
+git clone https://github.com/99ecarvalho/ws2socket.git
+cd ws2socket
 cmake -S . -B build
 cmake --build build
 
@@ -244,7 +246,8 @@ The full list of keys is in the man page (`man ws2socket`).
 
 Contributions are welcome, whether bug reports, documentation fixes or code.
 
-1. Open an issue describing the bug or feature before starting larger changes.
+1. Open an [issue](https://github.com/99ecarvalho/ws2socket/issues) describing the bug or feature before
+   starting larger changes.
 2. Keep the existing style: C11, K&R with 4-space indentation, and a Doxygen
    comment on every public function.
 3. Make sure the build is warning-free with the project flags
