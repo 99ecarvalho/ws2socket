@@ -147,8 +147,9 @@ int server_init(ws_server_t *server, const server_config_t *config)
         
         /* Load certificate file */
         if (strlen(config->cert_file) > 0) {
-            if (SSL_CTX_use_certificate_file(server->ssl_ctx, config->cert_file, 
-                                            SSL_FILETYPE_PEM) <= 0) {
+            /* Load the whole chain so intermediates are sent to clients */
+            if (SSL_CTX_use_certificate_chain_file(server->ssl_ctx,
+                                                   config->cert_file) <= 0) {
                 log_error("Failed to load certificate from %s", config->cert_file);
                 SSL_CTX_free(server->ssl_ctx);
                 server->ssl_ctx = NULL;

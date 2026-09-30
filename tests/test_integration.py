@@ -455,6 +455,47 @@ def test_tls_handshake_does_not_block_listener(binary):
                 idle.close()
 
 
+def test_tls_sends_certificate_chain(binary):
+    """A client that trusts only the root CA must accept the server."""
+    if not shutil.which("openssl"):
+        raise SkipTest("openssl command not found")
+    echo = TcpServer(echo_handler)
+    with tempfile.TemporaryDirectory() as tmp:
+        def path(name):
+            return os.path.join(tmp, name)
+
+        def openssl(*args):
+            subprocess.run(["openssl", *args], check=True, capture_output=True)
+
+        with open(path("ca.ext"), "w") as f:
+            f.write("basicConstraints=critical,CA:true\nkeyUsage=keyCertSign\n")
+        with open(path("srv.ext"), "w") as f:
+            f.write("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                "-keyout", path("root.key"), "-out", path("root.pem"),
+                "-subj", "/CN=Test Root")
+        for name, issuer, ext, cn in (("int", "root", "ca.ext", "Test Intermediate"),
+                                      ("srv", "int", "srv.ext", "localhost")):
+            openssl("req", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", path(f"{name}.key"), "-out", path(f"{name}.csr"),
+                    "-subj", f"/CN={cn}")
+            openssl("x509", "-req", "-days", "1", "-in", path(f"{name}.csr"),
+                    "-CA", path(f"{issuer}.pem"), "-CAkey", path(f"{issuer}.key"),
+                    "-CAcreateserial", "-extfile", path(ext),
+                    "-out", path(f"{name}.pem"))
+        with open(path("fullchain.pem"), "w") as out:
+            for name in ("srv", "int"):
+                with open(path(f"{name}.pem")) as f:
+                    out.write(f.read())
+
+        ctx = ssl.create_default_context(cafile=path("root.pem"))
+        with Proxy(binary, ["--target", f"127.0.0.1:{echo.port}",
+                            "--cert", path("fullchain.pem"),
+                            "--key", path("srv.key")]) as p:
+            url = f"wss://localhost:{p.port}/websockify"
+            assert run(echo_roundtrip(url, ssl=ctx)) == b"hello"
+
+
 def test_token_routing(binary):
     echo_a = TcpServer(lambda c: (c.sendall(b"A"), echo_handler(c)))
     echo_b = TcpServer(lambda c: (c.sendall(b"B"), echo_handler(c)))
