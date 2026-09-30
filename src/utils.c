@@ -17,9 +17,11 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
 #include <openssl/rand.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -88,6 +90,29 @@ int parse_hostport(const char *hostport, char *host_out, size_t host_out_size,
         return WS_EINVAL;
     }
 
+    /* Bracketed IPv6 literal: [addr] or [addr]:port */
+    if (hostport[0] == '[') {
+        const char *close = strchr(hostport, ']');
+        if (!close || (close[1] != '\0' && close[1] != ':')) {
+            return WS_EINVAL;
+        }
+        host_len = close - hostport - 1;
+        if (host_len == 0 || host_len >= host_out_size) {
+            return WS_EINVAL;
+        }
+        memcpy(host_out, hostport + 1, host_len);
+        host_out[host_len] = '\0';
+        *port_out = 0;
+        if (close[1] == ':') {
+            port_num = strtol(close + 2, &endptr, 10);
+            if (close[2] == '\0' || *endptr != '\0' || port_num < 1 || port_num > 65535) {
+                return WS_EINVAL;
+            }
+            *port_out = (uint16_t)port_num;
+        }
+        return WS_SUCCESS;
+    }
+
     /* Find the colon separator */
     colon = strrchr(hostport, ':');
 
@@ -102,7 +127,7 @@ int parse_hostport(const char *hostport, char *host_out, size_t host_out_size,
         host_out[host_len] = '\0';
 
         port_num = strtol(colon + 1, &endptr, 10);
-        if (*endptr != '\0' || port_num < 1 || port_num > 65535) {
+        if (colon[1] == '\0' || *endptr != '\0' || port_num < 1 || port_num > 65535) {
             return WS_EINVAL;
         }
 
@@ -263,21 +288,12 @@ ssize_t base64_decode(const char *encoded, uint8_t *data_out,
 int sha1_digest(const uint8_t *data, size_t data_len,
                uint8_t *digest_out)
 {
-    SHA_CTX ctx;
-
     if (!data || !digest_out) {
         return WS_EINVAL;
     }
 
-    if (!SHA1_Init(&ctx)) {
-        return WS_ESSL;
-    }
-
-    if (!SHA1_Update(&ctx, data, data_len)) {
-        return WS_ESSL;
-    }
-
-    if (!SHA1_Final(digest_out, &ctx)) {
+    /* SHA-1 is required by RFC 6455 for the handshake accept key */
+    if (!EVP_Digest(data, data_len, digest_out, NULL, EVP_sha1(), NULL)) {
         return WS_ESSL;
     }
 
@@ -536,6 +552,95 @@ ssize_t socket_recv(int sock_fd, uint8_t *buffer, size_t buffer_size,
     }
 
     return ret;
+}
+
+/**
+ * @brief Send a whole buffer on a plain or TLS connection
+ */
+ssize_t io_send_all(int sock_fd, SSL *ssl, const uint8_t *data, size_t data_len)
+{
+    size_t total = 0;
+
+    while (total < data_len) {
+        ssize_t n;
+
+        if (ssl) {
+            int chunk = (data_len - total > INT_MAX) ? INT_MAX : (int)(data_len - total);
+            n = SSL_write(ssl, data + total, chunk);
+            if (n <= 0) {
+                log_debug("SSL_write() failed: error %d", SSL_get_error(ssl, (int)n));
+                return -1;
+            }
+        } else {
+            n = send(sock_fd, data + total, data_len - total, MSG_NOSIGNAL);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                log_debug("send() error: %s", strerror(errno));
+                return -1;
+            }
+        }
+
+        total += (size_t)n;
+    }
+
+    return (ssize_t)total;
+}
+
+/**
+ * @brief Receive available data from a plain or TLS connection
+ */
+ssize_t io_recv(int sock_fd, SSL *ssl, uint8_t *buffer, size_t buffer_size)
+{
+    if (!buffer || buffer_size == 0) {
+        return -1;
+    }
+
+    if (ssl) {
+        int chunk = (buffer_size > INT_MAX) ? INT_MAX : (int)buffer_size;
+        int n = SSL_read(ssl, buffer, chunk);
+        if (n > 0) {
+            return n;
+        }
+
+        int err = SSL_get_error(ssl, n);
+        if (err == SSL_ERROR_ZERO_RETURN ||
+            (err == SSL_ERROR_SYSCALL && n == 0)) {
+            return 0;  /* Peer closed the connection */
+        }
+        log_debug("SSL_read() failed: error %d", err);
+        return -1;
+    }
+
+    for (;;) {
+        ssize_t n = recv(sock_fd, buffer, buffer_size, 0);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0) {
+            log_debug("recv() error: %s", strerror(errno));
+        }
+        return n;
+    }
+}
+
+/**
+ * @brief Receive exactly len bytes from a plain or TLS connection
+ */
+int io_recv_exact(int sock_fd, SSL *ssl, uint8_t *buffer, size_t len)
+{
+    size_t total = 0;
+
+    while (total < len) {
+        ssize_t n = io_recv(sock_fd, ssl, buffer + total, len - total);
+        if (n <= 0) {
+            return WS_ESOCKET;
+        }
+        total += (size_t)n;
+    }
+
+    return WS_SUCCESS;
 }
 
 /**

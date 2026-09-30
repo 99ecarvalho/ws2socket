@@ -55,6 +55,14 @@ typedef struct websocket {
     uint8_t compress_on_send;
     /** Compression streams initialized for decompression (WS→TCP) */
     uint8_t compression_initialized;
+    /** permessage-deflate was negotiated in the handshake */
+    uint8_t compression_negotiated;
+    /** The fragmented message being reassembled is compressed (RSV1) */
+    uint8_t msg_compressed;
+    /** Scratch buffer for inflated messages (allocated on first use) */
+    uint8_t *inflate_buf;
+    /** Size of inflate_buf */
+    size_t inflate_buf_size;
     /** Deflate stream for compression */
     z_stream deflate_stream;
     /** Inflate stream for decompression */

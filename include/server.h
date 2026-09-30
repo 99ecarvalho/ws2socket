@@ -185,12 +185,13 @@ int server_accept_client(ws_server_t *server, int *client_fd,
  * Receives and parses an HTTP request from the client socket.
  * 
  * @param client_fd Client socket
+ * @param ssl TLS session, or NULL for a plain connection
  * @param req Pointer to http_request_t to fill
  * @return WS_SUCCESS on success, error code otherwise
  * 
  * @note Memory for request must be freed with http_request_free()
  */
-int server_recv_request(int client_fd, http_request_t *req);
+int server_recv_request(int client_fd, SSL *ssl, http_request_t *req);
 
 /**
  * @brief Free HTTP request resources
@@ -244,6 +245,37 @@ const char *http_get_header(const http_request_t *req,
  * @return 1 if WebSocket upgrade request, 0 otherwise
  */
 int http_is_websocket_upgrade(const http_request_t *req);
+
+/**
+ * @brief Get a header value from a parsed request
+ *
+ * @param request HTTP request
+ * @param name Header name (case-insensitive)
+ * @return Header value or NULL if not present
+ */
+const char *http_get_header_value(const http_request_t *request, const char *name);
+
+/**
+ * @brief Send a bare HTTP status response and nothing else
+ *
+ * @param client_fd Client socket
+ * @param ssl TLS session, or NULL for a plain connection
+ * @param code HTTP status code
+ * @param reason Reason phrase (also used as the plain-text body)
+ * @return WS_SUCCESS on success, WS_ESOCKET on send failure
+ */
+int http_send_status(int client_fd, SSL *ssl, int code, const char *reason);
+
+/**
+ * @brief Serve a static file from the web root
+ *
+ * @param client_fd Client socket
+ * @param ssl TLS session, or NULL for a plain connection
+ * @param web_root Directory to serve files from
+ * @param uri_path Request path (query string is ignored)
+ * @return 0 when the file was sent, -1 otherwise (an error status is sent)
+ */
+int http_serve_file(int client_fd, SSL *ssl, const char *web_root, const char *uri_path);
 
 /**
  * @brief Main server loop

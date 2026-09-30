@@ -143,23 +143,30 @@ static ssize_t websocket_decompress_payload(websocket_t *ws, uint8_t *data,
         return data_len;
     }
     
-    // Add back the 0x00 0x00 0xFF 0xFF tail per RFC 7692
-    uint8_t temp_buf[data_len + 4];
-    memcpy(temp_buf, data, data_len);
-    temp_buf[data_len] = 0x00;
-    temp_buf[data_len + 1] = 0x00;
-    temp_buf[data_len + 2] = 0xFF;
-    temp_buf[data_len + 3] = 0xFF;
-    
-    ws->inflate_stream.next_in = temp_buf;
-    ws->inflate_stream.avail_in = data_len + 4;
+    // Inflate the payload, then the 0x00 0x00 0xFF 0xFF tail that RFC 7692
+    // strips from each message (fed separately to avoid copying the payload)
+    static const uint8_t tail[4] = { 0x00, 0x00, 0xFF, 0xFF };
+    const uint8_t *inputs[2] = { data, tail };
+    size_t input_lens[2] = { data_len, sizeof(tail) };
+
     ws->inflate_stream.next_out = out;
     ws->inflate_stream.avail_out = out_size;
-    
-    int ret = inflate(&ws->inflate_stream, Z_SYNC_FLUSH);
-    if (ret != Z_OK && ret != Z_BUF_ERROR) {
-        log_error("Inflate failed: %d", ret);
-        return -1;
+
+    for (int i = 0; i < 2; i++) {
+        ws->inflate_stream.next_in = (Bytef *)inputs[i];
+        ws->inflate_stream.avail_in = input_lens[i];
+
+        int ret = inflate(&ws->inflate_stream, Z_SYNC_FLUSH);
+        if (ret != Z_OK && ret != Z_BUF_ERROR) {
+            log_error("Inflate failed: %d", ret);
+            return -1;
+        }
+
+        /* Output buffer full: the message is at least out_size bytes, which
+         * callers treat as too big. Report it rather than truncating. */
+        if (ws->inflate_stream.avail_out == 0) {
+            return (ssize_t)out_size;
+        }
     }
     
     return out_size - ws->inflate_stream.avail_out;
@@ -215,6 +222,12 @@ int websocket_do_handshake(websocket_t *ws, const char *sec_key,
     }
     accept_key[encoded_len] = '\0';
     
+    // Only accept permessage-deflate if the client offered it (RFC 6455 9.1)
+    if (client_supports_compression &&
+        websocket_init_compression(ws) == WS_SUCCESS) {
+        ws->compression_negotiated = 1;
+    }
+
     // Send HTTP 101 Switching Protocols response
     char response[512];
     int len = snprintf(response, sizeof(response),
@@ -222,22 +235,20 @@ int websocket_do_handshake(websocket_t *ws, const char *sec_key,
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s\r\n"
-        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n"
+        "%s"
         "\r\n",
-        accept_key);
+        accept_key,
+        ws->compression_negotiated ?
+            "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n" : "");
     
-    ssize_t sent = socket_send(ws->sock_fd, (uint8_t *)response, len, 0);
-    if (sent != len) {
+    if (io_send_all(ws->sock_fd, ws->ssl, (uint8_t *)response, len) != len) {
         log_error("Failed to send WebSocket handshake response");
         return WS_ESOCKET;
     }
     
-    log_info("WebSocket handshake completed");
+    log_info("WebSocket handshake completed (compression: %s)",
+             ws->compression_negotiated ? "permessage-deflate" : "none");
     ws->state = WS_STATE_OPEN;
-    
-    // Initialize compression streams for receiving compressed frames from client
-    // We always initialize for decompression capability (handling RSV1 bit in incoming frames)
-    websocket_init_compression(ws);
     
     // DECISION: Don't compress outgoing frames for VNC protocol compatibility
     // Rationale: VNC uses binary protocol that doesn't compress well and adds overhead.
@@ -245,7 +256,6 @@ int websocket_do_handshake(websocket_t *ws, const char *sec_key,
     // Future: If compression is needed, set compress_on_send=1 and enable the
     //         websocket_send_frame_FIXME_compressed logic.
     ws->compress_on_send = 0;  // Disabled for VNC compatibility
-    (void)client_supports_compression;  // Suppress unused warning
     
     return WS_SUCCESS;
 #pragma GCC diagnostic pop
@@ -262,12 +272,18 @@ ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
     }
     
     if (ws->state != WS_STATE_OPEN) {
-        log_warn("Attempt to send on non-open WebSocket");
+        log_debug("Attempt to send on non-open WebSocket");
         return -1;
     }
     
-    uint8_t frame[MAX_FRAME_SIZE];
+    // Room for the largest header (14 bytes) plus a full-size payload
+    uint8_t frame[MAX_FRAME_SIZE + 14];
     size_t frame_len = 0;
+
+    if (data_len > MAX_FRAME_SIZE) {
+        log_error("Frame too large: %zu bytes", data_len);
+        return -1;
+    }
     
     // Byte 0: FIN + opcode
     frame[frame_len++] = (fin ? 0x80 : 0x00) | (opcode & 0x0F);
@@ -289,18 +305,14 @@ ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
     
     // Copy payload data
     if (data && data_len > 0) {
-        if (frame_len + data_len > MAX_FRAME_SIZE) {
-            log_error("Frame too large: %zu bytes", frame_len + data_len);
-            return -1;
-        }
         memcpy(frame + frame_len, data, data_len);
         frame_len += data_len;
     }
     
     // Send the frame
-    ssize_t sent = socket_send(ws->sock_fd, frame, frame_len, 0);
-    if (sent != (ssize_t)frame_len) {
+    if (io_send_all(ws->sock_fd, ws->ssl, frame, frame_len) != (ssize_t)frame_len) {
         log_error("Failed to send WebSocket frame");
+        ws->state = WS_STATE_CLOSED;
         return -1;
     }
 
@@ -375,8 +387,7 @@ ssize_t websocket_send_frame_FIXME_compressed(websocket_t *ws, const uint8_t *da
     }
     
     // Send the frame
-    ssize_t sent = socket_send(ws->sock_fd, frame, frame_len, 0);
-    if (sent != (ssize_t)frame_len) {
+    if (io_send_all(ws->sock_fd, ws->ssl, frame, frame_len) != (ssize_t)frame_len) {
         log_error("Failed to send WebSocket frame");
         return -1;
     }
@@ -388,7 +399,38 @@ ssize_t websocket_send_frame_FIXME_compressed(websocket_t *ws, const uint8_t *da
 }
 
 /**
+ * @brief Fail the connection with a close frame (RFC 6455 section 7.1.7)
+ */
+static ssize_t websocket_fail(websocket_t *ws, uint16_t code, const char *why)
+{
+    log_warn("Closing WebSocket (%u): %s", code, why);
+    websocket_close(ws, code, NULL);
+    ws->state = WS_STATE_CLOSED;
+    return -1;
+}
+
+/**
+ * @brief Discard any partially reassembled message
+ */
+static void websocket_reset_fragments(websocket_t *ws)
+{
+    free(ws->partial_msg);
+    ws->partial_msg = NULL;
+    ws->partial_msg_len = 0;
+    ws->partial_msg_capacity = 0;
+    ws->fragmented_opcode = 0;
+    ws->msg_compressed = 0;
+}
+
+/**
  * @brief Receive and decode a WebSocket frame
+ *
+ * Reads one frame. Control frames are handled internally, and fragmented
+ * messages are reassembled (and decompressed) before being returned.
+ *
+ * @return Length of a complete data message (possibly 0), 0 when a control
+ *         frame or non-final fragment was consumed, or -1 on error. When the
+ *         session ends, ws->state is no longer WS_STATE_OPEN.
  */
 ssize_t websocket_recv_frame(websocket_t *ws, uint8_t *data_out,
                              size_t data_len, uint8_t *opcode_out)
@@ -401,165 +443,133 @@ ssize_t websocket_recv_frame(websocket_t *ws, uint8_t *data_out,
         return 0;
     }
     
-    uint8_t header[14];  // Max header size
-    ssize_t n;
-    
-    // Read first 2 bytes
-    n = socket_recv(ws->sock_fd, header, 2, 0);
-    if (n <= 0) {
-        if (n == 0) {
-            ws->state = WS_STATE_CLOSING;
-        }
-        return n;
-    }
-    
-    if (n < 2) {
-        log_error("Incomplete WebSocket frame header");
-        return -1;
+    uint8_t header[8];
+    size_t header_len = 2;
+
+    // Read the fixed 2-byte header; failure here means the peer went away
+    if (io_recv_exact(ws->sock_fd, ws->ssl, header, 2) != WS_SUCCESS) {
+        log_debug("WebSocket peer closed the connection");
+        ws->state = WS_STATE_CLOSED;
+        return 0;
     }
     
     // Parse header byte 0
     int fin = (header[0] & 0x80) != 0;
     int rsv1 = (header[0] & 0x40) != 0;  // Compression flag
     uint8_t opcode = header[0] & 0x0F;
+    int is_control = (opcode & 0x08) != 0;
     
     // Parse header byte 1
     int masked = (header[1] & 0x80) != 0;
     uint64_t payload_len = header[1] & 0x7F;
+
+    if (header[0] & 0x30) {
+        return websocket_fail(ws, 1002, "reserved bits RSV2/RSV3 set");
+    }
+    if (rsv1 && (!ws->compression_negotiated || is_control ||
+                 opcode == WS_OPCODE_CONTINUATION)) {
+        return websocket_fail(ws, 1002, "unexpected RSV1 bit");
+    }
+    if (!masked) {
+        return websocket_fail(ws, 1002, "client frame is not masked");
+    }
+    if (is_control && (!fin || payload_len > 125)) {
+        return websocket_fail(ws, 1002, "invalid control frame");
+    }
     
     // Read extended payload length if needed
     if (payload_len == 126) {
-        n = socket_recv(ws->sock_fd, header + 2, 2, 0);
-        if (n != 2) {
-            log_error("Failed to read extended payload length");
+        if (io_recv_exact(ws->sock_fd, ws->ssl, header, 2) != WS_SUCCESS) {
+            ws->state = WS_STATE_CLOSED;
             return -1;
         }
-        payload_len = ((uint64_t)header[2] << 8) | header[3];
+        payload_len = ((uint64_t)header[0] << 8) | header[1];
+        header_len += 2;
     } else if (payload_len == 127) {
-        n = socket_recv(ws->sock_fd, header + 2, 8, 0);
-        if (n != 8) {
-            log_error("Failed to read extended payload length");
+        if (io_recv_exact(ws->sock_fd, ws->ssl, header, 8) != WS_SUCCESS) {
+            ws->state = WS_STATE_CLOSED;
             return -1;
         }
         payload_len = 0;
         for (int i = 0; i < 8; i++) {
-            payload_len = (payload_len << 8) | header[2 + i];
+            payload_len = (payload_len << 8) | header[i];
         }
+        header_len += 8;
     }
     
-    // Read masking key if present
-    uint8_t mask[4] = {0};
-    if (masked) {
-        n = socket_recv(ws->sock_fd, mask, 4, 0);
-        if (n != 4) {
-            log_error("Failed to read masking key");
-            return -1;
-        }
+    // Read masking key
+    uint8_t mask[4];
+    if (io_recv_exact(ws->sock_fd, ws->ssl, mask, 4) != WS_SUCCESS) {
+        ws->state = WS_STATE_CLOSED;
+        return -1;
     }
+    header_len += 4;
     
     // Check payload size
     if (payload_len > data_len) {
         log_error("Payload too large: %lu bytes (buffer: %zu)", 
                  (unsigned long)payload_len, data_len);
-        return -1;
+        return websocket_fail(ws, 1009, "message too big");
     }
     
-    // Read payload data
+    // Read and unmask payload data
     if (payload_len > 0) {
-        size_t total_read = 0;
-        while (total_read < payload_len) {
-            n = socket_recv(ws->sock_fd, data_out + total_read,
-                          payload_len - total_read, 0);
-            if (n <= 0) {
-                log_error("Failed to read payload data");
-                return -1;
-            }
-            total_read += n;
-        }
-        
-        // Unmask payload if masked
-        if (masked) {
-            for (size_t i = 0; i < payload_len; i++) {
-                data_out[i] ^= mask[i % 4];
-            }
-        }
-    }
-    
-    // Decompress payload if RSV1 bit is set (per-message deflate)
-    if (rsv1 && payload_len > 0) {
-        // Save original compressed size for wire tracking
-        size_t compressed_size = payload_len;
-        
-        // Need a temporary buffer for decompression
-        uint8_t decomp_buf[65536];  // 64KB buffer for decompressed data
-        ssize_t decomp_len = websocket_decompress_payload(ws, data_out, payload_len, 
-                                                         decomp_buf, sizeof(decomp_buf));
-        if (decomp_len < 0) {
-            log_error("Failed to decompress WebSocket payload");
+        if (io_recv_exact(ws->sock_fd, ws->ssl, data_out, payload_len) != WS_SUCCESS) {
+            log_error("Failed to read payload data");
+            ws->state = WS_STATE_CLOSED;
             return -1;
         }
-        
-        // Copy decompressed data back to output buffer
-        if (decomp_len > (ssize_t)data_len) {
-            log_error("Decompressed payload too large: %zd bytes (buffer: %zu)", 
-                     decomp_len, data_len);
-            return -1;
-        }
-        
-        log_debug("Decompressed WebSocket payload: %zu -> %zd bytes", 
-                 compressed_size, decomp_len);
-        memcpy(data_out, decomp_buf, decomp_len);
-        payload_len = decomp_len;
-        
-        // Track wire bytes (original compressed size + header)
-        ws->bytes_received_wire += compressed_size + 2 + (masked ? 4 : 0);
-        if (compressed_size >= 126 && compressed_size < 65536) {
-            ws->bytes_received_wire += 2;
-        } else if (compressed_size >= 65536) {
-            ws->bytes_received_wire += 8;
-        }
-    } else {
-        // No compression - track actual frame size
-        ws->bytes_received_wire += payload_len + 2 + (masked ? 4 : 0);
-        if (payload_len >= 126 && payload_len < 65536) {
-            ws->bytes_received_wire += 2;
-        } else if (payload_len >= 65536) {
-            ws->bytes_received_wire += 8;
+        for (size_t i = 0; i < payload_len; i++) {
+            data_out[i] ^= mask[i % 4];
         }
     }
-    
-    if (opcode_out) {
-        *opcode_out = opcode;
-    }
+
+    // Track wire bytes (frame as received)
+    ws->bytes_received_wire += header_len + payload_len;
     
     // Handle control frames
     if (opcode == WS_OPCODE_CLOSE) {
-        ws->state = WS_STATE_CLOSING;
-        // Send close frame back
-        websocket_send_frame(ws, NULL, 0, WS_OPCODE_CLOSE, 1);
+        uint16_t code = 1000;
+        if (payload_len >= 2) {
+            code = (uint16_t)((data_out[0] << 8) | data_out[1]);
+        }
+        ws->close_received = 1;
+        ws->close_code = code;
+        log_debug("Received close frame (code %u)", code);
+        websocket_close(ws, code, NULL);  // Echo the close frame
+        ws->state = WS_STATE_CLOSED;
         return 0;
     } else if (opcode == WS_OPCODE_PING) {
-        // Respond with pong
         websocket_send_frame(ws, data_out, payload_len, WS_OPCODE_PONG, 1);
         return 0;
+    } else if (opcode == WS_OPCODE_PONG) {
+        return 0;
+    } else if (is_control) {
+        return websocket_fail(ws, 1002, "unknown control opcode");
     }
-    
-    // Handle fragmented messages (continuation frames)
+
+    // Data frames: reassemble fragmented messages
+    uint8_t message_opcode = opcode;
+    int message_compressed = rsv1;
+    size_t message_len = payload_len;
+
     if (opcode == WS_OPCODE_CONTINUATION) {
-        // This is a continuation frame
         if (!ws->partial_msg) {
-            log_error("Received continuation frame without initial frame");
-            return -1;
+            return websocket_fail(ws, 1002, "continuation without initial frame");
         }
         
-        // Append to partial message
         size_t new_len = ws->partial_msg_len + payload_len;
+        if (new_len > data_len) {
+            websocket_reset_fragments(ws);
+            return websocket_fail(ws, 1009, "reassembled message too big");
+        }
         if (new_len > ws->partial_msg_capacity) {
             size_t new_cap = new_len * 2;
             uint8_t *new_buf = realloc(ws->partial_msg, new_cap);
             if (!new_buf) {
                 log_error("Failed to realloc partial message buffer");
-                return -1;
+                websocket_reset_fragments(ws);
+                return websocket_fail(ws, 1011, "out of memory");
             }
             ws->partial_msg = new_buf;
             ws->partial_msg_capacity = new_cap;
@@ -568,51 +578,67 @@ ssize_t websocket_recv_frame(websocket_t *ws, uint8_t *data_out,
         memcpy(ws->partial_msg + ws->partial_msg_len, data_out, payload_len);
         ws->partial_msg_len = new_len;
         
-        if (fin) {
-            // Final fragment - return complete message
-            if (ws->partial_msg_len > data_len) {
-                log_error("Reassembled message too large");
-                free(ws->partial_msg);
-                ws->partial_msg = NULL;
-                ws->partial_msg_len = 0;
-                ws->partial_msg_capacity = 0;
-                return -1;
-            }
-            memcpy(data_out, ws->partial_msg, ws->partial_msg_len);
-            ssize_t total_len = ws->partial_msg_len;
-            if (opcode_out) {
-                *opcode_out = ws->fragmented_opcode;
-            }
-            free(ws->partial_msg);
-            ws->partial_msg = NULL;
-            ws->partial_msg_len = 0;
-            ws->partial_msg_capacity = 0;
-            ws->fragmented_opcode = 0;
-            return total_len;
-        } else {
-            // More fragments coming
-            return 0;
+        if (!fin) {
+            return 0;  // More fragments coming
         }
-    } else if (!fin) {
-        // First frame of a fragmented message
+
+        // Final fragment - the complete message goes to data_out
+        memcpy(data_out, ws->partial_msg, ws->partial_msg_len);
+        message_len = ws->partial_msg_len;
+        message_opcode = ws->fragmented_opcode;
+        message_compressed = ws->msg_compressed;
+        websocket_reset_fragments(ws);
+    } else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
         if (ws->partial_msg) {
-            log_warn("Starting new fragmented message while one is in progress");
-            free(ws->partial_msg);
+            websocket_reset_fragments(ws);
+            return websocket_fail(ws, 1002, "new message inside a fragmented message");
         }
-        
-        ws->fragmented_opcode = opcode;
-        ws->partial_msg_capacity = payload_len * 2;
-        ws->partial_msg = malloc(ws->partial_msg_capacity);
-        if (!ws->partial_msg) {
-            log_error("Failed to allocate partial message buffer");
-            return -1;
+        if (!fin) {
+            // First frame of a fragmented message
+            ws->fragmented_opcode = opcode;
+            ws->msg_compressed = (uint8_t)rsv1;
+            ws->partial_msg_capacity = payload_len > 0 ? payload_len * 2 : 1024;
+            ws->partial_msg = malloc(ws->partial_msg_capacity);
+            if (!ws->partial_msg) {
+                log_error("Failed to allocate partial message buffer");
+                return websocket_fail(ws, 1011, "out of memory");
+            }
+            memcpy(ws->partial_msg, data_out, payload_len);
+            ws->partial_msg_len = payload_len;
+            return 0;  // Waiting for more fragments
         }
-        
-        memcpy(ws->partial_msg, data_out, payload_len);
-        ws->partial_msg_len = payload_len;
-        return 0;  // Waiting for more fragments
+    } else {
+        return websocket_fail(ws, 1002, "unknown data opcode");
     }
-    // Single complete frame
+
+    // Decompress the complete message (permessage-deflate, RFC 7692)
+    if (message_compressed && message_len > 0) {
+        /* One spare byte lets us detect output that would not fit */
+        if (ws->inflate_buf_size < data_len + 1) {
+            free(ws->inflate_buf);
+            ws->inflate_buf = malloc(data_len + 1);
+            ws->inflate_buf_size = ws->inflate_buf ? data_len + 1 : 0;
+            if (!ws->inflate_buf) {
+                return websocket_fail(ws, 1011, "out of memory");
+            }
+        }
+        ssize_t decomp_len = websocket_decompress_payload(ws, data_out, message_len,
+                                                         ws->inflate_buf, data_len + 1);
+        if (decomp_len < 0) {
+            return websocket_fail(ws, 1007, "invalid compressed data");
+        }
+        if ((size_t)decomp_len > data_len) {
+            return websocket_fail(ws, 1009, "decompressed message too big");
+        }
+        log_debug("Decompressed WebSocket payload: %zu -> %zd bytes",
+                 message_len, decomp_len);
+        memcpy(data_out, ws->inflate_buf, decomp_len);
+        message_len = (size_t)decomp_len;
+    }
     
-    return payload_len;
+    if (opcode_out) {
+        *opcode_out = message_opcode;
+    }
+    
+    return (ssize_t)message_len;
 }

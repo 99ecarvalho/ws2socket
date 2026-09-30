@@ -62,6 +62,9 @@
 
 /** Maximum buffer size for frames */
 #define MAX_FRAME_SIZE 65536
+
+/** Default maximum size of a message received from a WebSocket client */
+#define DEFAULT_MAX_MESSAGE_SIZE (1024 * 1024)
 /** Default HTTP port */
 #define DEFAULT_HTTP_PORT 80
 /** Default HTTPS port */

@@ -22,6 +22,7 @@
 #include "proxy.h"
 #include "websocket.h"
 #include "utils.h"
+#include "token_auth.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -37,6 +38,9 @@ static ws_server_t *g_server = NULL;
 
 /** Global application configuration */
 static app_config_t g_config;
+
+/** Token-to-target map (NULL unless a token file is configured) */
+static token_auth_t *g_token_auth = NULL;
 
 /**
  * @brief Signal handler for graceful shutdown
@@ -82,42 +86,54 @@ static int handle_client(ws_server_t *server, int client_fd,
 
     /* Generate unique client ID using PID and timestamp for forked processes */
     static uint32_t process_counter = 0;
-    uint32_t client_id = (getpid() << 16) | (__sync_fetch_and_add(&process_counter, 1) & 0xFFFF);
+    uint32_t client_id = ((uint32_t)getpid() << 16) | (__sync_fetch_and_add(&process_counter, 1) & 0xFFFF);
 
     log_info("[Client %u] New connection from %s", client_id, client_addr_str);
 
     /* Receive HTTP request */
-    ret = server_recv_request(client_fd, &request);
+    ret = server_recv_request(client_fd, ssl, &request);
     if (ret != WS_SUCCESS) {
-        log_error("Failed to receive HTTP request");
-        close(client_fd);
+        log_error("[Client %u] Failed to receive HTTP request", client_id);
         return ret;
     }
-
-    /* Declare external functions from http_server.c */
-    extern int http_is_websocket_upgrade(const http_request_t *request);
-    extern int http_serve_file(int client_fd, const char *web_root, const char *uri_path);
-    extern const char *http_get_header_value(const http_request_t *request, const char *name);
 
     /* Check if this is a WebSocket upgrade request */
     if (!http_is_websocket_upgrade(&request)) {
         /* Serve static file if web_root is set */
         if (strlen(server->web_root) > 0) {
             log_info("[Client %u] Serving file: %s", client_id, request.path);
-            http_serve_file(client_fd, server->web_root, request.path);
+            http_serve_file(client_fd, ssl, server->web_root, request.path);
         } else {
-            const char *response = "HTTP/1.1 426 Upgrade Required\r\n\r\n";
-            socket_send(client_fd, (uint8_t *)response, strlen(response), 0);
+            http_send_status(client_fd, ssl, 426, "Upgrade Required");
         }
-        close(client_fd);
         return WS_SUCCESS;
+    }
+
+    /* Choose the target: from the token file, or the configured default */
+    char target_host[256];
+    uint16_t target_port;
+
+    if (g_token_auth) {
+        char token[256];
+        token_target_t token_target;
+
+        if (token_auth_extract_from_path(request.path, token, sizeof(token)) != WS_SUCCESS ||
+            token_auth_lookup(g_token_auth, token, &token_target) != WS_SUCCESS) {
+            log_warn("[Client %u] Rejected: missing or unknown token", client_id);
+            http_send_status(client_fd, ssl, 403, "Forbidden");
+            return WS_EAUTH;
+        }
+        strlcpy(target_host, token_target.host, sizeof(target_host));
+        target_port = token_target.port;
+    } else {
+        strlcpy(target_host, g_config.target_host, sizeof(target_host));
+        target_port = g_config.target_port;
     }
 
     /* Create WebSocket */
     ws = websocket_create();
     if (!ws) {
         log_error("Failed to create WebSocket");
-        close(client_fd);
         return WS_ENOMEM;
     }
 
@@ -126,17 +142,7 @@ static int handle_client(ws_server_t *server, int client_fd,
     if (ret != WS_SUCCESS) {
         log_error("Failed to initialize WebSocket: %d", ret);
         websocket_destroy(ws);
-        close(client_fd);
         return ret;
-    }
-
-    /* Perform WebSocket handshake */
-    const char *ws_key = http_get_header_value(&request, "Sec-WebSocket-Key");
-    if (!ws_key) {
-        log_error("Missing Sec-WebSocket-Key header");
-        websocket_destroy(ws);
-        close(client_fd);
-        return WS_EPROTO;
     }
 
     /* Build headers array for websocket_accept */
@@ -153,51 +159,41 @@ static int handle_client(ws_server_t *server, int client_fd,
         headers[i] = header_lines[i];
     }
 
-    ret = websocket_accept(ws, headers, request.num_headers);
-    if (ret != WS_SUCCESS) {
-        log_error("Failed to accept WebSocket: %d", ret);
-        websocket_destroy(ws);
-        close(client_fd);
-        return ret;
-    }
-
-    /* Create proxy client */
+    /* Connect to the target before completing the handshake, so a client
+     * whose target is unreachable gets an HTTP error instead of a WebSocket
+     * that closes immediately */
     proxy_client = proxy_client_create();
     if (!proxy_client) {
         log_error("[Client %u] Failed to create proxy client", client_id);
         websocket_destroy(ws);
-        close(client_fd);
         return WS_ENOMEM;
     }
+    proxy_client->client_id = client_id;
 
+    ret = proxy_connect_target(proxy_client, target_host, target_port, 0);
+    if (ret != WS_SUCCESS) {
+        log_error("[Client %u] Failed to connect to target %s:%u", client_id, target_host, target_port);
+        http_send_status(client_fd, ssl, 502, "Bad Gateway");
+        websocket_destroy(ws);
+        proxy_client_destroy(proxy_client);
+        return ret;
+    }
+
+    ret = websocket_accept(ws, headers, request.num_headers);
+    if (ret != WS_SUCCESS) {
+        log_error("[Client %u] Failed to accept WebSocket: %d", client_id, ret);
+        http_send_status(client_fd, ssl, 400, "Bad Request");
+        websocket_destroy(ws);
+        proxy_client_destroy(proxy_client);
+        return ret;
+    }
+
+    /* proxy_client_create() made its own WebSocket object; use ours */
+    websocket_destroy(proxy_client->ws);
     proxy_client->ws = ws;
     proxy_client->client_id = client_id;
     memcpy(&proxy_client->src_addr, addr, sizeof(struct sockaddr_storage));
     proxy_client->src_addr_len = sizeof(struct sockaddr_storage);
-
-    /* Connect to target server */
-    char target_host[256];
-    uint16_t target_port;
-    
-    // Use target from global config (set via command line or config file)
-    if (parse_hostport(g_config.target_host, target_host, 
-                      sizeof(target_host), &target_port) != 0) {
-        log_error("Failed to parse target server");
-        proxy_client_destroy(proxy_client);
-        return WS_EINVAL;
-    }
-    
-    // If no port specified, use target_port
-    if (target_port == 0) {
-        target_port = g_config.target_port;
-    }
-
-    ret = proxy_connect_target(proxy_client, target_host, target_port, g_config.server.socket_timeout);
-    if (ret != WS_SUCCESS) {
-        log_error("[Client %u] Failed to connect to target %s:%u", client_id, target_host, target_port);
-        proxy_client_destroy(proxy_client);
-        return ret;
-    }
 
     log_info("[Client %u] WebSocket connection established, proxying to %s:%u", 
              client_id, target_host, target_port);
@@ -209,6 +205,33 @@ static int handle_client(ws_server_t *server, int client_fd,
     proxy_client_destroy(proxy_client);
 
     return WS_SUCCESS;
+}
+
+/**
+ * @brief Turn a relative path into an absolute one, in place
+ *
+ * Daemon mode changes the working directory to "/", so paths given relative
+ * to the starting directory must be resolved first.
+ *
+ * @return 0 on success, -1 if the result does not fit
+ */
+static int make_absolute(char *path, size_t size)
+{
+    char cwd[4096];
+    char resolved[4096];
+
+    if (path[0] == '\0' || path[0] == '/') {
+        return 0;
+    }
+    if (!getcwd(cwd, sizeof(cwd))) {
+        return -1;
+    }
+    if ((size_t)snprintf(resolved, sizeof(resolved), "%s/%s", cwd, path) >= size) {
+        log_error("Path too long: %s/%s", cwd, path);
+        return -1;
+    }
+    strlcpy(path, resolved, size);
+    return 0;
 }
 
 /**
@@ -312,19 +335,37 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Parse command-line arguments */
+    /* Parse command-line arguments (first pass: validate, find --config) */
     if (config_parse_args(argc, argv, &g_config) != WS_SUCCESS) {
-        fprintf(stderr, "Invalid arguments\n");
-        config_print_usage(argv[0]);
+        fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    /* Load configuration file if specified */
+    /* Load configuration file if specified, then re-apply the command line
+     * so that command-line options take precedence over the file */
     if (strlen(g_config.config_file) > 0) {
-        if (config_load_file(g_config.config_file, &g_config) != WS_SUCCESS) {
+        char config_file[sizeof(g_config.config_file)];
+        strlcpy(config_file, g_config.config_file, sizeof(config_file));
+
+        config_init_defaults(&g_config);
+        if (config_load_file(config_file, &g_config) != WS_SUCCESS) {
             fprintf(stderr, "Failed to load configuration file\n");
             return EXIT_FAILURE;
         }
+        if (config_parse_args(argc, argv, &g_config) != WS_SUCCESS) {
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* Resolve relative paths before anything changes the working directory */
+    if (make_absolute(g_config.server.cert_file, sizeof(g_config.server.cert_file)) < 0 ||
+        make_absolute(g_config.server.key_file, sizeof(g_config.server.key_file)) < 0 ||
+        make_absolute(g_config.web_root, sizeof(g_config.web_root)) < 0 ||
+        make_absolute(g_config.token_file, sizeof(g_config.token_file)) < 0 ||
+        make_absolute(g_config.pid_file, sizeof(g_config.pid_file)) < 0 ||
+        make_absolute(g_config.logging.logfile, sizeof(g_config.logging.logfile)) < 0) {
+        fprintf(stderr, "Invalid path in configuration\n");
+        return EXIT_FAILURE;
     }
 
     /* Validate configuration */
@@ -354,6 +395,16 @@ int main(int argc, char *argv[])
         log_info("Daemonizing...");
         if (daemonize(g_config.pid_file) < 0) {
             log_critical("Failed to daemonize");
+            log_shutdown();
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* Load the token file, if token-based routing is enabled */
+    if (g_config.token_auth) {
+        g_token_auth = token_auth_create(g_config.token_file, 1);
+        if (!g_token_auth) {
+            log_critical("Failed to initialize token file %s", g_config.token_file);
             log_shutdown();
             return EXIT_FAILURE;
         }

@@ -70,6 +70,7 @@ void websocket_destroy(websocket_t *ws)
     if (ws->partial_msg) {
         free(ws->partial_msg);
     }
+    free(ws->inflate_buf);
     
     // Cleanup compression streams
     if (ws->compression_initialized) {
@@ -214,6 +215,12 @@ int websocket_close(websocket_t *ws, uint16_t code, const char *reason)
     if (!ws) {
         return WS_EINVAL;
     }
+
+    /* Send at most one close frame per connection */
+    if (ws->close_sent || ws->state != WS_STATE_OPEN) {
+        ws->state = WS_STATE_CLOSING;
+        return WS_SUCCESS;
+    }
     
     extern ssize_t websocket_send_frame(websocket_t *ws, const uint8_t *data,
                                        size_t data_len, uint8_t opcode, int fin);
@@ -235,6 +242,7 @@ int websocket_close(websocket_t *ws, uint16_t code, const char *reason)
     }
     
     websocket_send_frame(ws, close_frame, frame_len, WS_OPCODE_CLOSE, 1);
+    ws->close_sent = 1;
     ws->state = WS_STATE_CLOSING;
     
     return WS_SUCCESS;
@@ -247,6 +255,11 @@ int websocket_pending(const websocket_t *ws)
 {
     if (!ws) {
         return 0;
+    }
+
+    /* TLS may hold decrypted bytes that select() cannot see */
+    if (ws->ssl && SSL_pending(ws->ssl) > 0) {
+        return 1;
     }
 
     return !buffer_is_empty(&ws->recv_buf);

@@ -216,9 +216,33 @@ const char *http_get_mime_type(const char *path)
 }
 
 /**
+ * @brief Send a bare HTTP status response
+ */
+int http_send_status(int client_fd, SSL *ssl, int code, const char *reason)
+{
+    char response[256];
+    int len = snprintf(response, sizeof(response),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s\n",
+        code, reason, strlen(reason) + 1, reason);
+
+    if (len < 0 || (size_t)len >= sizeof(response)) {
+        return WS_EINVAL;
+    }
+    if (io_send_all(client_fd, ssl, (uint8_t *)response, (size_t)len) != len) {
+        return WS_ESOCKET;
+    }
+    return WS_SUCCESS;
+}
+
+/**
  * @brief Serve static file
  */
-int http_serve_file(int client_fd, const char *web_root, const char *uri_path)
+int http_serve_file(int client_fd, SSL *ssl, const char *web_root, const char *uri_path)
 {
     if (!web_root || !uri_path) {
         return -1;
@@ -248,8 +272,7 @@ int http_serve_file(int client_fd, const char *web_root, const char *uri_path)
     // Security: prevent directory traversal
     if (strstr(file_path, "..")) {
         log_warn("Directory traversal attempt: %s", file_path);
-        const char *response = "HTTP/1.1 403 Forbidden\r\n\r\n";
-        socket_send(client_fd, (uint8_t *)response, strlen(response), 0);
+        http_send_status(client_fd, ssl, 403, "Forbidden");
         return -1;
     }
     
@@ -257,19 +280,15 @@ int http_serve_file(int client_fd, const char *web_root, const char *uri_path)
     int fd = open(file_path, O_RDONLY);
     if (fd < 0) {
         log_debug("File not found: %s", file_path);
-        const char *response = "HTTP/1.1 404 Not Found\r\n"
-                              "Content-Type: text/html\r\n\r\n"
-                              "<h1>404 Not Found</h1>";
-        socket_send(client_fd, (uint8_t *)response, strlen(response), 0);
+        http_send_status(client_fd, ssl, 404, "Not Found");
         return -1;
     }
     
     // Get file size
     struct stat st;
-    if (fstat(fd, &st) < 0) {
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
         close(fd);
-        const char *response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
-        socket_send(client_fd, (uint8_t *)response, strlen(response), 0);
+        http_send_status(client_fd, ssl, 404, "Not Found");
         return -1;
     }
     
@@ -286,7 +305,7 @@ int http_serve_file(int client_fd, const char *web_root, const char *uri_path)
         "\r\n",
         mime, (long)st.st_size);
     
-    if (socket_send(client_fd, (uint8_t *)header, header_len, 0) != header_len) {
+    if (io_send_all(client_fd, ssl, (uint8_t *)header, header_len) != header_len) {
         close(fd);
         return -1;
     }
@@ -295,7 +314,7 @@ int http_serve_file(int client_fd, const char *web_root, const char *uri_path)
     char buffer[8192];
     ssize_t nread;
     while ((nread = read(fd, buffer, sizeof(buffer))) > 0) {
-        if (socket_send(client_fd, (uint8_t *)buffer, nread, 0) != nread) {
+        if (io_send_all(client_fd, ssl, (uint8_t *)buffer, nread) != nread) {
             close(fd);
             return -1;
         }

@@ -20,6 +20,7 @@
 
 #include "common.h"
 #include <stddef.h>
+#include <openssl/ssl.h>
 
 /**
  * @defgroup StringFunctions String Functions
@@ -204,6 +205,42 @@ ssize_t socket_send(int sock_fd, const uint8_t *data, size_t data_len,
  */
 ssize_t socket_recv(int sock_fd, uint8_t *buffer, size_t buffer_size,
                    int flags);
+
+/**
+ * @brief Send a whole buffer on a plain or TLS connection
+ *
+ * Loops until every byte is written. Uses SSL_write() when @p ssl is set,
+ * send() otherwise.
+ *
+ * @param sock_fd Socket file descriptor
+ * @param ssl TLS session, or NULL for a plain socket
+ * @param data Data to send
+ * @param data_len Length of data
+ * @return @p data_len on success, -1 on error
+ */
+ssize_t io_send_all(int sock_fd, SSL *ssl, const uint8_t *data, size_t data_len);
+
+/**
+ * @brief Receive available data from a plain or TLS connection
+ *
+ * @param sock_fd Socket file descriptor
+ * @param ssl TLS session, or NULL for a plain socket
+ * @param buffer Buffer to store data
+ * @param buffer_size Size of buffer
+ * @return Number of bytes received, 0 when the peer closed, -1 on error
+ */
+ssize_t io_recv(int sock_fd, SSL *ssl, uint8_t *buffer, size_t buffer_size);
+
+/**
+ * @brief Receive exactly @p len bytes from a plain or TLS connection
+ *
+ * @param sock_fd Socket file descriptor
+ * @param ssl TLS session, or NULL for a plain socket
+ * @param buffer Buffer to store data
+ * @param len Number of bytes to read
+ * @return WS_SUCCESS, or WS_ESOCKET if the connection closed or failed first
+ */
+int io_recv_exact(int sock_fd, SSL *ssl, uint8_t *buffer, size_t len);
 
 /**
  * @brief Shutdown socket

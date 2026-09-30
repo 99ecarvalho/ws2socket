@@ -32,6 +32,10 @@ static proxy_config_t g_proxy_config = {0};
 /** Global connection pool */
 static conn_pool_t *g_conn_pool = NULL;
 
+/** Buffer for messages from the WebSocket client (one session per process) */
+static uint8_t *g_ws_buffer = NULL;
+static size_t g_ws_buffer_size = 0;
+
 /**
  * @brief Initialize proxy system
  */
@@ -90,8 +94,8 @@ proxy_client_t *proxy_client_create(void)
     client->target_fd = -1;
     client->active = 1;
 
-    if (buffer_init(&client->send_buf, g_proxy_config.buffer_size) != WS_SUCCESS ||
-        buffer_init(&client->recv_buf, g_proxy_config.buffer_size) != WS_SUCCESS) {
+    if (buffer_init(&client->send_buf, MAX_FRAME_SIZE) != WS_SUCCESS ||
+        buffer_init(&client->recv_buf, MAX_FRAME_SIZE) != WS_SUCCESS) {
         proxy_client_destroy(client);
         return NULL;
     }
@@ -217,8 +221,10 @@ int proxy_forward(proxy_client_t *client)
         max_fd = (client->ws->sock_fd > client->target_fd) ?
                  client->ws->sock_fd : client->target_fd;
 
-        /* Wait for activity */
-        tv.tv_sec = g_proxy_config.socket_timeout;
+        /* Wait for activity. Data already decrypted by TLS is invisible to
+         * select(), so don't block while any is pending. */
+        int ws_pending = websocket_pending(client->ws);
+        tv.tv_sec = ws_pending ? 0 : g_proxy_config.socket_timeout;
         tv.tv_usec = 0;
 
         ret = select(max_fd + 1, &read_set, NULL, NULL, &tv);
@@ -230,15 +236,15 @@ int proxy_forward(proxy_client_t *client)
             break;
         }
 
-        if (ret == 0) {
-            /* Timeout - send ping to keep connection alive */
+        if (ret == 0 && !ws_pending) {
+            /* Idle timeout: keep the session open */
             continue;
         }
 
         /* Check WebSocket for data */
-        if (FD_ISSET(client->ws->sock_fd, &read_set)) {
+        if (ws_pending || FD_ISSET(client->ws->sock_fd, &read_set)) {
             ret = proxy_forward_ws_to_tcp(client);
-            if (ret <= 0) {
+            if (ret < 0 || websocket_get_state(client->ws) != WS_STATE_OPEN) {
                 log_info("[Client %u] WebSocket closed", client->client_id);
                 break;
             }
@@ -249,6 +255,7 @@ int proxy_forward(proxy_client_t *client)
             ret = proxy_forward_tcp_to_ws(client);
             if (ret <= 0) {
                 log_info("[Client %u] Target socket closed", client->client_id);
+                websocket_close(client->ws, ret == 0 ? 1000 : 1011, NULL);
                 break;
             }
         }
@@ -256,9 +263,9 @@ int proxy_forward(proxy_client_t *client)
 
     /* Calculate connection duration */
     time_t duration = time(NULL) - client->connect_time;
-    int hours = duration / 3600;
-    int minutes = (duration % 3600) / 60;
-    int seconds = duration % 60;
+    log_info("[Client %u] Session ended after %ld:%02ld:%02ld", client->client_id,
+             (long)(duration / 3600), (long)((duration % 3600) / 60),
+             (long)(duration % 60));
     
     /* Get compressed wire sizes from WebSocket layer */
     uint64_t ws_rx_wire = client->ws->bytes_received_wire;
@@ -271,7 +278,7 @@ int proxy_forward(proxy_client_t *client)
         (double)ws_tx_wire / client->bytes_sent * 100.0 : 100.0;
     
     /* Verbose mode: Show detailed stats WITHOUT duration */
-    if (log_get_level() <= LOG_DEBUG) {
+    if (log_get_level() <= WS_LOG_DEBUG) {
         log_info("[Client %u] === Connection Closed ===", client->client_id);
         log_info("[Client %u]   RX: %lu bytes (wire: %lu, compression: %.1f%%)", 
                  client->client_id, 
@@ -298,27 +305,41 @@ int proxy_forward(proxy_client_t *client)
  */
 ssize_t proxy_forward_ws_to_tcp(proxy_client_t *client)
 {
-    uint8_t buffer[MAX_FRAME_SIZE];
     ssize_t received, sent;
 
     if (!client || client->target_fd < 0) {
         return -1;
     }
 
+    // buffer_size is the largest message accepted from the client
+    size_t wanted = g_proxy_config.buffer_size > 0 ?
+                    g_proxy_config.buffer_size : DEFAULT_MAX_MESSAGE_SIZE;
+    if (g_ws_buffer_size != wanted) {
+        free(g_ws_buffer);
+        g_ws_buffer = malloc(wanted);
+        g_ws_buffer_size = g_ws_buffer ? wanted : 0;
+        if (!g_ws_buffer) {
+            log_error("Failed to allocate %zu-byte message buffer", wanted);
+            return -1;
+        }
+    }
+    uint8_t *buffer = g_ws_buffer;
+
     // Receive WebSocket frame (this decompresses automatically)
-    received = websocket_recv(client->ws, buffer, sizeof(buffer));
+    received = websocket_recv(client->ws, buffer, g_ws_buffer_size);
     if (received < 0) {
         log_error("Failed to receive WebSocket data");
         return -1;
     }
     
     if (received == 0) {
-        // Connection closed
+        // Control frame, partial fragment, empty message or close:
+        // nothing to forward (the caller checks the WebSocket state)
         return 0;
     }
 
     // Forward to TCP socket
-    sent = socket_send(client->target_fd, buffer, received, 0);
+    sent = io_send_all(client->target_fd, NULL, buffer, received);
     if (sent != received) {
         log_error("Failed to forward data to target");
         return -1;

@@ -346,7 +346,7 @@ int token_auth_lookup(token_auth_t *auth, const char *token, token_target_t *tar
     entry = hash_lookup((token_hash_t *)auth->tokens, token);
     if (!entry) {
         pthread_mutex_unlock(&auth->lock);
-        log_debug("Token not found: %s", token);
+        log_debug("Token not found: '%s'", token);
         return WS_EAUTH;
     }
     
@@ -355,8 +355,9 @@ int token_auth_lookup(token_auth_t *auth, const char *token, token_target_t *tar
     
     pthread_mutex_unlock(&auth->lock);
     
-    log_info("Token authenticated: %s -> %s:%u", token, 
-            target_out->host, target_out->port);
+    /* Tokens are secrets: log them only at debug level */
+    log_debug("Token '%s' accepted", token);
+    log_info("Token authenticated -> %s:%u", target_out->host, target_out->port);
     
     return WS_SUCCESS;
 }
@@ -376,16 +377,24 @@ int token_auth_extract_from_path(const char *path, char *token_out, size_t token
     /* Format 1: /websockify?token=TOKEN */
     query = strchr(path, '?');
     if (query) {
-        const char *token_param = strstr(query, "token=");
-        if (token_param) {
-            token_start = token_param + 6; /* Skip "token=" */
-            const char *end = strchr(token_start, '&');
-            size_t len = end ? (size_t)(end - token_start) : strlen(token_start);
-            
-            if (len > 0 && len < token_out_size) {
-                memcpy(token_out, token_start, len);
-                token_out[len] = '\0';
-                return WS_SUCCESS;
+        /* Find a parameter named exactly "token" (not e.g. "mytoken") */
+        const char *param = query + 1;
+        while (param && *param) {
+            if (strncmp(param, "token=", 6) == 0) {
+                token_start = param + 6; /* Skip "token=" */
+                const char *end = strpbrk(token_start, "&#");
+                size_t len = end ? (size_t)(end - token_start) : strlen(token_start);
+
+                if (len > 0 && len < token_out_size) {
+                    memcpy(token_out, token_start, len);
+                    token_out[len] = '\0';
+                    return WS_SUCCESS;
+                }
+                return WS_ERROR;
+            }
+            param = strchr(param, '&');
+            if (param) {
+                param++;
             }
         }
     }
@@ -408,8 +417,9 @@ int token_auth_extract_from_path(const char *path, char *token_out, size_t token
         
         size_t len = end ? (size_t)(end - token_start) : strlen(token_start);
         
-        if (len > 0 && len < token_out_size && 
-            strcmp(token_start, "websockify") != 0) {
+        /* "/websockify" is noVNC's default path, not a token */
+        if (len > 0 && len < token_out_size &&
+            !(len == 10 && strncmp(token_start, "websockify", 10) == 0)) {
             memcpy(token_out, token_start, len);
             token_out[len] = '\0';
             return WS_SUCCESS;

@@ -88,11 +88,11 @@ int log_shutdown(void)
 static const char *log_level_name(int level)
 {
     switch (level) {
-        case LOG_DEBUG:    return "DEBUG";
-        case LOG_INFO:     return "INFO";
-        case LOG_WARN:     return "WARNING";
-        case LOG_ERROR:    return "ERROR";
-        case LOG_CRITICAL: return "CRITICAL";
+        case WS_LOG_DEBUG:    return "DEBUG";
+        case WS_LOG_INFO:     return "INFO";
+        case WS_LOG_WARN:     return "WARNING";
+        case WS_LOG_ERROR:    return "ERROR";
+        case WS_LOG_CRITICAL: return "CRITICAL";
         default:           return "UNKNOWN";
     }
 }
@@ -103,11 +103,11 @@ static const char *log_level_name(int level)
 static int log_level_to_syslog(int level)
 {
     switch (level) {
-        case LOG_DEBUG:    return LOG_DEBUG;
-        case LOG_INFO:     return LOG_INFO;
-        case LOG_WARN:     return LOG_WARNING;
-        case LOG_ERROR:    return LOG_ERR;
-        case LOG_CRITICAL: return LOG_CRIT;
+        case WS_LOG_DEBUG:    return LOG_DEBUG;
+        case WS_LOG_INFO:     return LOG_INFO;
+        case WS_LOG_WARN:     return LOG_WARNING;
+        case WS_LOG_ERROR:    return LOG_ERR;
+        case WS_LOG_CRITICAL: return LOG_CRIT;
         default:           return LOG_INFO;
     }
 }
@@ -122,7 +122,20 @@ void log_message(int level, const char *fmt, ...)
     time_t now;
     struct tm *tm_info;
 
-    if (!g_logger_config || level < g_logger_config->level) {
+    /* Before log_init() (e.g. while parsing arguments), report warnings and
+     * errors on stderr so they are not lost */
+    if (!g_logger_config) {
+        if (level >= WS_LOG_WARN) {
+            va_start(args, fmt);
+            fprintf(stderr, "ws2socket: ");
+            vfprintf(stderr, fmt, args);
+            fprintf(stderr, "\n");
+            va_end(args);
+        }
+        return;
+    }
+
+    if (level < g_logger_config->level) {
         return;
     }
 
@@ -180,7 +193,7 @@ void log_set_level(int level)
  */
 int log_get_level(void)
 {
-    int level = LOG_INFO;
+    int level = WS_LOG_INFO;
 
     pthread_mutex_lock(&g_log_mutex);
     if (g_logger_config) {

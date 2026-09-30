@@ -23,16 +23,52 @@
 #include <sys/wait.h>
 #include <signal.h>
 
+/** Number of live child processes (one per client connection) */
+static volatile sig_atomic_t g_active_children = 0;
+
 /**
  * @brief Signal handler for SIGCHLD to reap zombie processes
  */
 static void sigchld_handler(int sig)
 {
+    int saved_errno = errno;
     (void)sig;
     /* Reap all terminated child processes */
     while (waitpid(-1, NULL, WNOHANG) > 0) {
-        /* Child reaped */
+        if (g_active_children > 0) {
+            g_active_children--;
+        }
     }
+    errno = saved_errno;
+}
+
+/**
+ * @brief Perform the TLS handshake on a freshly accepted connection
+ *
+ * Runs in the child process so a slow or silent client cannot stall the
+ * accept loop. The socket's receive/send timeouts bound the handshake.
+ *
+ * @return TLS session, or NULL if the handshake failed
+ */
+static SSL *server_tls_handshake(ws_server_t *server, int client_fd)
+{
+    SSL *ssl = SSL_new(server->ssl_ctx);
+    if (!ssl) {
+        log_error("Failed to create SSL structure");
+        return NULL;
+    }
+
+    SSL_set_fd(ssl, client_fd);
+
+    int ssl_ret = SSL_accept(ssl);
+    if (ssl_ret <= 0) {
+        log_warn("TLS handshake failed: error %d", SSL_get_error(ssl, ssl_ret));
+        SSL_free(ssl);
+        return NULL;
+    }
+
+    log_debug("TLS connection established (%s)", SSL_get_version(ssl));
+    return ssl;
 }
 
 /**
@@ -234,35 +270,9 @@ int server_accept_client(ws_server_t *server, int *client_fd,
 
     *client_fd = ret;
 
-    /* Handle SSL accept if SSL is enabled */
-    if (ssl_ptr && server->ssl_ctx) {
-        SSL *ssl = SSL_new(server->ssl_ctx);
-        if (!ssl) {
-            log_error("Failed to create SSL structure");
-            close(*client_fd);
-            return WS_ESSL;
-        }
-        
-        SSL_set_fd(ssl, *client_fd);
-        
-        int ssl_ret = SSL_accept(ssl);
-        if (ssl_ret <= 0) {
-            int ssl_err = SSL_get_error(ssl, ssl_ret);
-            log_error("SSL accept failed: error %d", ssl_err);
-            SSL_free(ssl);
-            close(*client_fd);
-            return WS_ESSL;
-        }
-        
-        *ssl_ptr = ssl;
-        log_debug("SSL connection established");
-    } else if (ssl_ptr) {
+    /* The TLS handshake happens in the child process (see server_run) */
+    if (ssl_ptr) {
         *ssl_ptr = NULL;
-    }
-
-    server->num_connections++;
-    if (server->num_connections >= server->config.max_connections) {
-        server->max_reached = 1;
     }
 
     return WS_SUCCESS;
@@ -271,7 +281,7 @@ int server_accept_client(ws_server_t *server, int *client_fd,
 /**
  * @brief Receive HTTP request from client
  */
-int server_recv_request(int client_fd, http_request_t *req)
+int server_recv_request(int client_fd, SSL *ssl, http_request_t *req)
 {
     if (!req) {
         return WS_EINVAL;
@@ -288,7 +298,7 @@ int server_recv_request(int client_fd, http_request_t *req)
     
     // Read until we get \r\n\r\n (end of headers)
     while (total < (ssize_t)sizeof(buffer) - 1) {
-        n = socket_recv(client_fd, (uint8_t *)buffer + total, sizeof(buffer) - total - 1, 0);
+        n = io_recv(client_fd, ssl, (uint8_t *)buffer + total, sizeof(buffer) - total - 1);
         if (n <= 0) {
             if (n == 0) {
                 log_debug("Client closed connection during request");
@@ -400,39 +410,84 @@ int server_run(ws_server_t *server, client_handler_t handler)
         return WS_EINVAL;
     }
 
+    sigset_t chld_set;
+    sigemptyset(&chld_set);
+    sigaddset(&chld_set, SIGCHLD);
+
     while (server->running) {
         /* Accept incoming connection */
+        client_addr_len = sizeof(client_addr);
         int ret = server_accept_client(server, &client_fd, &client_addr,
-                                       &client_addr_len, &ssl);
+                                       &client_addr_len, NULL);
         if (ret != WS_SUCCESS) {
-            if (errno == EINTR) {
+            if (errno == EINTR || errno == ECONNABORTED) {
                 continue;
             }
             break;
         }
 
-        /* Fork to handle client in separate process */
+        /* Enforce the connection limit before spending a process on it */
+        if (server->config.max_connections > 0 &&
+            g_active_children >= server->config.max_connections) {
+            log_warn("Connection limit (%d) reached, rejecting client",
+                     server->config.max_connections);
+            if (!server->ssl_ctx) {
+                socket_set_timeout(client_fd, 1);
+                http_send_status(client_fd, NULL, 503, "Service Unavailable");
+            }
+            close(client_fd);
+            continue;
+        }
+
+        /* Fork to handle client in separate process. SIGCHLD is blocked so
+         * the child counter cannot be updated concurrently. */
+        sigprocmask(SIG_BLOCK, &chld_set, NULL);
         pid_t pid = fork();
+        if (pid > 0) {
+            g_active_children++;
+            server->num_connections = g_active_children;
+        }
+        sigprocmask(SIG_UNBLOCK, &chld_set, NULL);
         
         if (pid < 0) {
             /* Fork failed */
             log_error("Failed to fork for client: %s", strerror(errno));
             close(client_fd);
-            server->num_connections--;
             continue;
         }
         
         if (pid == 0) {
             /* Child process - handle client */
+            signal(SIGCHLD, SIG_DFL);
             close(server->listen_fd);  /* Child doesn't need listener socket */
+
+            /* Bound how long a client may stall the TLS handshake, the HTTP
+             * request, or a partially sent frame ([server] socket_timeout) */
+            if (server->config.socket_timeout > 0) {
+                socket_set_timeout(client_fd, server->config.socket_timeout);
+            }
+
+            ssl = NULL;
+            if (server->ssl_ctx) {
+                ssl = server_tls_handshake(server, client_fd);
+                if (!ssl) {
+                    close(client_fd);
+                    exit(1);
+                }
+            }
+
             handler(server, client_fd, &client_addr, ssl);
+
+            if (ssl) {
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+            }
             close(client_fd);
             exit(0);  /* Child exits after handling client */
         }
         
         /* Parent process - close client fd and continue accepting */
         close(client_fd);
-        /* Note: We don't wait for child here to allow concurrent connections */
     }
 
     return WS_SUCCESS;
@@ -459,7 +514,7 @@ int server_get_stats(ws_server_t *server, int *num_connections)
         return WS_EINVAL;
     }
 
-    *num_connections = server->num_connections;
+    *num_connections = g_active_children;
 
     return WS_SUCCESS;
 }

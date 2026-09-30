@@ -27,15 +27,15 @@
  */
 
 /** Debug level - detailed diagnostic information */
-#define LOG_DEBUG 0
+#define WS_LOG_DEBUG 0
 /** Info level - general informational messages */
-#define LOG_INFO 1
+#define WS_LOG_INFO 1
 /** Warning level - warning messages */
-#define LOG_WARN 2
+#define WS_LOG_WARN 2
 /** Error level - error messages */
-#define LOG_ERROR 3
+#define WS_LOG_ERROR 3
 /** Critical level - critical system errors */
-#define LOG_CRITICAL 4
+#define WS_LOG_CRITICAL 4
 
 /** @} */
 
@@ -110,7 +110,7 @@ void log_message(int level, const char *fmt, ...);
  * @param fmt Format string (printf-style)
  * @param ... Variable arguments
  */
-#define log_debug(fmt, ...) log_message(LOG_DEBUG, fmt, ##__VA_ARGS__)
+#define log_debug(fmt, ...) log_message(WS_LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 /**
  * @brief Log info message
@@ -118,7 +118,7 @@ void log_message(int level, const char *fmt, ...);
  * @param fmt Format string (printf-style)
  * @param ... Variable arguments
  */
-#define log_info(fmt, ...) log_message(LOG_INFO, fmt, ##__VA_ARGS__)
+#define log_info(fmt, ...) log_message(WS_LOG_INFO, fmt, ##__VA_ARGS__)
 
 /**
  * @brief Log warning message
@@ -126,7 +126,7 @@ void log_message(int level, const char *fmt, ...);
  * @param fmt Format string (printf-style)
  * @param ... Variable arguments
  */
-#define log_warn(fmt, ...) log_message(LOG_WARN, fmt, ##__VA_ARGS__)
+#define log_warn(fmt, ...) log_message(WS_LOG_WARN, fmt, ##__VA_ARGS__)
 
 /**
  * @brief Log error message
@@ -134,7 +134,7 @@ void log_message(int level, const char *fmt, ...);
  * @param fmt Format string (printf-style)
  * @param ... Variable arguments
  */
-#define log_error(fmt, ...) log_message(LOG_ERROR, fmt, ##__VA_ARGS__)
+#define log_error(fmt, ...) log_message(WS_LOG_ERROR, fmt, ##__VA_ARGS__)
 
 /**
  * @brief Log critical error message
@@ -142,7 +142,7 @@ void log_message(int level, const char *fmt, ...);
  * @param fmt Format string (printf-style)
  * @param ... Variable arguments
  */
-#define log_critical(fmt, ...) log_message(LOG_CRITICAL, fmt, ##__VA_ARGS__)
+#define log_critical(fmt, ...) log_message(WS_LOG_CRITICAL, fmt, ##__VA_ARGS__)
 
 /**
  * @brief Set logging level
