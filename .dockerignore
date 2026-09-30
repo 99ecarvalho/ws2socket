@@ -1,0 +1,16 @@
+# Keep the Docker build context small and reproducible
+.git
+.vscode
+.vscode-ctags
+.idea
+build/
+build-*/
+docs/html/
+docs/latex/
+noVNC/
+websockify/
+*.o
+*.a
+*.so
+*.tar.gz
+*.zip

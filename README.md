@@ -130,8 +130,16 @@ This installs `bin/ws2socket` and the man page `share/man/man1/ws2socket.1`.
 
 ### Docker
 
-The [docker/](docker/) directory contains a Dockerfile and a helper script that
-build the project in a clean container. See [docker/README.md](docker/README.md).
+The [docker/](docker/) directory builds a small runtime image (about 80 MB,
+running as a non-root user):
+
+```bash
+docker build -f docker/Dockerfile -t ws2socket .
+docker run --rm -p 6080:6080 ws2socket --target 192.168.1.50:5900
+```
+
+See [docker/README.md](docker/README.md) for noVNC, configuration files and
+reaching services on the Docker host.
 
 ## Usage
 
