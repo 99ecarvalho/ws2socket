@@ -1,491 +1,319 @@
-# ws2socket Implementation Notes
+# ws2socket Internals
 
-## Project Notes
+This document describes how ws2socket is put together. It is meant for
+contributors and for anyone integrating ws2socket into a larger system. For
+using the program, see the [README](../README.md) and the
+[Quick Start](../QUICKSTART.md).
 
-Might not be fully up-to-date.
+The generated Doxygen reference (`docs/html/index.html`, built with
+`cmake --build build --target docs`) documents every function and structure.
+This document covers the big picture.
 
-### Revision (January 2026)
+## Contents
 
-**Implementation:**
-1. ✅ **WebSocket Protocol (RFC 6455)** - websocket_impl.c
-   - SHA1 + Base64 handshake per RFC specification
-   - Complete frame encoding/decoding (7-bit, 16-bit, 64-bit payload lengths)
-   - Client-to-server masking/unmasking
-   - Control frames: PING (auto-respond), PONG, CLOSE
-   - Binary and text frame support
+- [Design goals](#design-goals)
+- [Process model](#process-model)
+- [Request flow](#request-flow)
+- [Source layout](#source-layout)
+- [Modules](#modules)
+- [Configuration handling](#configuration-handling)
+- [Error handling](#error-handling)
+- [Known limitations](#known-limitations)
+- [Build system](#build-system)
+- [Yocto integration](#yocto-integration)
+- [Coding conventions](#coding-conventions)
+- [Roadmap](#roadmap)
 
-2. ✅ **HTTP Server** - http_server.c
-   - Full HTTP/1.1 request parsing
-   - Static file serving with 15+ MIME types
-   - WebSocket upgrade detection
-   - Directory traversal protection
-   - Perfect for serving noVNC HTML/JS/CSS/WASM files
+## Design goals
 
-3. ✅ **Bidirectional Proxy** - proxy.c
-   - select()-based event loop
-   - WebSocket ↔ TCP forwarding
-   - Statistics tracking (bytes sent/received)
-   - Configurable buffers and timeouts
+- **Replace websockify where Python is unavailable.** Keep the same model: one
+  listening port, static files for the web client, and a WebSocket bridged to a
+  TCP target.
+- **Few dependencies.** Only libc, pthreads, OpenSSL (for SHA-1 in the
+  handshake and for TLS) and zlib (for permessage-deflate).
+- **Simple, auditable code.** Plain C11, blocking I/O and `select()`, with no
+  event-loop framework.
+- **Fault isolation.** A crash or hang in one session must not affect the
+  others.
 
-4. ✅ **Configuration File Loading** - Complete INI parser in config.c
-   - Sections: [general], [server], [proxy], [logging]
-   - Comment support (# and ;)
-   - Key=value parsing with whitespace trimming
-   - Command-line override support
+## Process model
 
-5. ✅ **Command-Line Options**
-   - Full argument validation
+ws2socket uses a **process-per-connection** model: the listener forks one child for each accepted client.
 
-**Build Status:**
-- ✅ Ready for production use with noVNC
-
-## General Notes
-
-### 1. Project Structure
-
-```
-/dados/ws2tcp/ws2socket/
-├── ws2socket.conf.example      # Example configuration file
-├── include/                    # Header files
-│   ├── common.h               # Common definitions, error codes, macros
-│   ├── logging.h              # Logging system interface
-│   ├── websocket.h            # RFC 6455 WebSocket protocol
-│   ├── server.h               # HTTP/WebSocket server
-│   ├── proxy.h                # TCP proxy functionality
-│   ├── utils.h                # Utility functions
-│   └── config.h               # Configuration handling
-├── src/                        # Implementation files
-│   ├── logging.c              # Logging implementation
-│   ├── utils.c                # Utility functions
-│   ├── websocket.c            # WebSocket protocol wrappers
-│   ├── websocket_impl.c       # WebSocket RFC 6455 implementation
-│   ├── http_server.c          # HTTP server with file serving
-│   ├── server.c               # Server implementation
-│   ├── proxy.c                # Proxy implementation
-│   ├── config.c               # Config parsing
-│   └── ws2socket.c            # Main application
-├── build/                      # Build directory (generated)
-│   └── ws2socket              # Compiled binary
-└── docs/                       # Doxygen documentation (generated)
-    └── html/                   # HTML documentation
+```text
+                    ┌──────────────────────────┐
+                    │ parent: accept() loop    │
+                    │ (server_run, server.c)   │
+                    └────────────┬─────────────┘
+                     fork() per accepted client
+            ┌────────────────────┼────────────────────┐
+            ▼                    ▼                    ▼
+   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+   │ child: HTTP     │  │ child: WebSocket│  │ child: WebSocket│
+   │ serve one file, │  │ ⇄ TCP select()  │  │ ⇄ TCP select()  │
+   │ then exit       │  │ loop            │  │ loop            │
+   └─────────────────┘  └─────────────────┘  └─────────────────┘
 ```
 
-## Key Features Implemented
+- The parent only accepts connections. If TLS is configured, it also runs the
+  TLS handshake. It then forks. A `SIGCHLD` handler reaps finished children.
+- Each child handles exactly one HTTP request or one WebSocket session, then
+  exits.
+- Inside a child, `proxy_forward()` runs a `select()` loop over two
+  descriptors: the client socket and the target socket. An idle `select()`
+  timeout (`socket_timeout`) does not close the session.
 
-### 1. **Complete Doxygen Documentation**
-- All files, functions, structures, and enums
-- Three-layer documentation:
-  - File-level with license and purpose
-  - Function-level with parameters, return values, and notes
-  - Inline comments for complex logic
-- Defgroups for logical organization
-- Example code in documentation
-- Automatic HTML documentation generation
+Consequences:
 
-### 2. **Modular Architecture**
-- **Common Module** - Shared definitions, error codes, constants
-- **Logging Module** - Multi-target logging (console, file, syslog)
-- **WebSocket Module** - RFC 6455 protocol implementation
-- **Server Module** - HTTP/WebSocket server handling
-- **Proxy Module** - Bidirectional TCP proxying
-- **Utils Module** - Base64, SHA1, socket operations, circular buffers
-- **Config Module** - Argument parsing and configuration
-- **Main Application** - Entry point, signal handling, daemonization
+- Sessions are fully isolated, and there is no shared mutable state between
+  them.
+- Per-session memory is one process. That is cheap with copy-on-write, but a
+  very high connection count costs more than it would with an event loop.
+- Anything that is meant to span sessions (metrics, connection pooling) would
+  need shared memory or IPC, because each child has its own copy. See
+  [Known limitations](#known-limitations).
 
-### 3. **Doxygen Comments Format**
+## Request flow
 
-All code follows strict Doxygen formatting:
+`handle_client()` in `src/ws2socket.c` runs in the child:
 
-```c
-/**
- * @file filename.h
- * @brief Short description
- * @author Eduardo Correia <ecorreia@apliant.com.br>
- * 
- * Longer detailed description with implementation notes.
- * 
- * License: LGPL v3
- */
+1. `server_recv_request()` reads and parses the HTTP request (method, path,
+   up to 32 headers).
+2. If the request is **not** a WebSocket upgrade
+   (`http_is_websocket_upgrade()`):
+   - with a web root, `http_serve_file()` sends the file or an error status;
+   - without one, the reply is `426 Upgrade Required`.
 
-/**
- * @defgroup GroupName Group Description
- * @{
- */
-// ... code
-/** @} */
+   The connection is then closed.
+3. For an upgrade, `websocket_accept()` computes
+   `Sec-WebSocket-Accept = base64(SHA1(key + GUID))`, sends `101 Switching
+   Protocols` and sets up permessage-deflate.
+4. `proxy_connect_target()` opens the TCP connection to the configured target,
+   with a timeout.
+5. `proxy_forward()` copies data in both directions until either side closes:
+   - WebSocket to TCP: the frame is read, unmasked, reassembled if fragmented
+     and decompressed if needed, and the payload is written to the target.
+     Ping frames get a pong; a close frame ends the loop.
+   - TCP to WebSocket: whatever is read from the target is sent as one binary
+     frame.
+6. On exit, per-session byte counts, including the compression ratio, are
+   logged.
 
-/**
- * @struct structure_name
- * @brief Brief description
- * 
- * Detailed description of structure members and purpose.
- */
-typedef struct {
-    int member;  /**< Member description */
-} structure_t;
+## Source layout
 
-/**
- * @brief Function brief description
- * 
- * Detailed function description.
- * 
- * @param param1 Parameter description
- * @return Return value description
- * @note Optional note
- * @see Related functions
- */
-int function_name(int param1);
+```text
+.
+├── CMakeLists.txt           Build definition
+├── Doxyfile.in              Doxygen template (configured by CMake)
+├── ws2socket.conf.example   Annotated configuration file
+├── include/                 Public headers, one per module
+├── src/                     Implementation
+├── docs/
+│   ├── ws2socket.1          Man page
+│   ├── IMPLEMENTATION.md    This document
+│   ├── NOVNC_GUIDE.md       noVNC deployment guide
+│   └── html/                Generated API reference (not in git)
+└── docker/                  Container build helper
 ```
 
-### 4. **CMake Build System**
+## Modules
 
-```cmake
-cmake_minimum_required(VERSION 3.10)
-project(ws2socket VERSION 0.1.0 LANGUAGES C)
+| Module | Files | Responsibility |
+|---|---|---|
+| Application | `src/ws2socket.c` | `main()`, signal handling, daemonization, per-client handler |
+| Configuration | `include/config.h`, `src/config.c` | Defaults, command-line parsing, INI file loading, validation, `--help` and `--version` |
+| Server | `include/server.h`, `src/server.c` | Listening socket, TLS context, `accept()` and fork loop, HTTP request reading |
+| HTTP | `src/http_server.c` | Upgrade detection, header lookup, static files, MIME types |
+| WebSocket | `include/websocket.h`, `src/websocket.c`, `src/websocket_impl.c` | RFC 6455 handshake, frame codec, masking, fragmentation, control frames, permessage-deflate |
+| Proxy | `include/proxy.h`, `src/proxy.c` | Target connection, bidirectional `select()` forwarding, statistics |
+| Utilities | `include/utils.h`, `src/utils.c` | Safe strings, `host:port` parsing, Base64, SHA-1, random bytes, socket helpers, circular buffer |
+| Logging | `include/logging.h`, `src/logging.c` | Levels, and console, file and syslog targets (mutex-protected) |
+| Token auth | `include/token_auth.h`, `src/token_auth.c` | Token-file parser and hash-table lookup (not wired in yet) |
+| Connection pool | `include/conn_pool.h`, `src/conn_pool.c` | LRU pool of target connections (see limitations) |
+| Metrics | `include/metrics.h`, `src/metrics.c` | Counters with Prometheus and JSON export (not wired in yet) |
+| Common | `include/common.h` | Error codes, limits, WebSocket opcodes and states |
 
-# Features:
-- Automatic OpenSSL detection
-- Pthread linking
-- Warning flags for code quality
-- Doxygen documentation target
-- Install target
-```
+### WebSocket details
 
-Build commands:
+- Supports all three payload-length encodings (7-bit, 16-bit and 64-bit).
+- Unmasks client frames. Server frames are sent unmasked, as RFC 6455
+  requires.
+- Reassembles continuation frames into one message before delivery.
+- permessage-deflate uses raw DEFLATE (`windowBits = -15`) with
+  `server_no_context_takeover` and `client_no_context_takeover`, so no state
+  is kept between messages.
+- Data from the target is always sent as **binary** frames, which is what
+  noVNC and websockify clients expect.
+
+### HTTP details
+
+- Requests are read until the end of the headers. Only `GET` is meaningful.
+- The request path is joined to the web root. A trailing `/` maps to
+  `index.html`. Any path containing `..` is rejected.
+- MIME types: `html`/`htm`, `css`, `js`, `json`, `png`, `jpg`/`jpeg`, `gif`,
+  `svg`, `ico`, `wasm` and `txt`. Everything else is sent as
+  `application/octet-stream`.
+- Every response is `Connection: close`, so there is no keep-alive.
+
+### Logging
+
+| Level | Config value | Use |
+|---|---|---|
+| `LOG_DEBUG` | `debug` | Frames, headers, per-read detail (`--verbose`) |
+| `LOG_INFO` | `info` | Connections, configuration summary (the default) |
+| `LOG_WARN` | `warning` | Recoverable oddities, such as a bad config line |
+| `LOG_ERROR` | `error` | Failed operations |
+| `LOG_CRITICAL` | `critical` | Startup failures |
+
+The targets `LOG_TARGET_CONSOLE` (stderr), `LOG_TARGET_FILE` and
+`LOG_TARGET_SYSLOG` can be combined. The syslog facility is `LOG_LOCAL0`.
+
+## Configuration handling
+
+`main()` builds the configuration in this order:
+
+1. `config_init_defaults()`: listen `0.0.0.0:6080`, buffer 64 KiB, up to 1024
+   connections, 60 s socket timeout, log level `info` to the console.
+2. `config_parse_args()`: command-line options.
+3. `config_load_file()`: the INI file, if `--config` was given.
+4. `config_validate()`: requires a non-zero port, a target, and both a
+   certificate and a key if either is set.
+
+Because step 3 runs after step 2, **file values override command-line
+values**. This is the reverse of the usual convention and is listed as a
+limitation below.
+
+The recognized sections and keys are:
+
+| Section | Keys |
+|---|---|
+| `[general]` | `daemon`, `pid_file`, `token_file` |
+| `[server]` | `listen`, `port`, `cert_file`, `key_file`, `max_connections`, `socket_timeout`, `web_root` |
+| `[proxy]` | `target`, `buffer_size`, `max_connections`, `socket_timeout` |
+| `[logging]` | `level`, `file`, `console`, `syslog` |
+
+Unknown keys are ignored silently.
+
+## Error handling
+
+Functions return `int` status codes from `common.h`, or `NULL` or `-1` for
+constructors and I/O:
+
+| Code | Value | Meaning |
+|---|---|---|
+| `WS_SUCCESS` | 0 | Success |
+| `WS_ERROR` | -1 | Generic failure |
+| `WS_ENOMEM` | -2 | Out of memory |
+| `WS_EINVAL` | -3 | Invalid argument |
+| `WS_ECONNREF` | -4 | Connection refused |
+| `WS_ESOCKET` | -5 | Socket error |
+| `WS_ESSL` | -6 | TLS error |
+| `WS_EPROTO` | -7 | Protocol violation |
+| `WS_EAUTH` | -8 | Authentication failure |
+| `WS_EINTERNAL` | -9 | Internal error |
+
+## Known limitations
+
+These are known gaps as of version 0.1.0. They are good first contributions.
+
+1. **Native TLS does not carry data.** `server_init()` creates a TLS 1.2+
+   context and loads the certificate and key, and `server_accept_client()`
+   runs `SSL_accept()`. After that, however, all reads and writes still use
+   the raw socket (`socket_recv`/`socket_send`) instead of
+   `SSL_read`/`SSL_write`, so `wss://` does not work. The TLS handshake also
+   runs in the parent process, where a slow client blocks `accept()`.
+2. **permessage-deflate is always advertised.** `websocket_accept()` detects
+   whether the client offered the extension, but always includes it in the
+   `101` response. Clients that did not offer it must fail the connection
+   (RFC 6455 section 9.1), so tools such as websocat, or Python `websockets`
+   with compression disabled, cannot connect. Browsers are not affected.
+3. **Token routing is not connected.** `token_file` is parsed and
+   `token_auth.c` implements lookup, but `handle_client()` always uses the
+   single configured target.
+4. **Metrics are not exposed.** `metrics.c` can format Prometheus and JSON
+   output, but nothing collects metrics or serves an endpoint. With the
+   process-per-connection model, counters would also need shared memory.
+5. **The connection pool is inert.** The pool is created, but connections are
+   never returned to it (`conn_pool_put()` is not called), so every session
+   opens a new target connection. That is the correct behavior for stateful
+   protocols like VNC, so the pool should probably stay disabled for them.
+6. **Configuration precedence.** Config-file values override command-line
+   options (see above).
+7. **`max_connections` is not enforced** on the process count.
+8. **HTTP is minimal.** There is no keep-alive, no `HEAD`/`Range` support and
+   no directory listing. Errors are plain status lines.
+9. **No automated tests.** There are no unit, integration or fuzz tests yet.
+10. **Deprecated OpenSSL API.** `SHA1_Init`, `SHA1_Update` and `SHA1_Final`
+    trigger deprecation warnings on OpenSSL 3.x. The `EVP_Digest*` API
+    replaces them.
+
+## Build system
+
+CMake 3.10 or newer, C11:
+
 ```bash
-mkdir build
-cd build
-cmake ..
-make              # Build binary
-make docs        # Generate Doxygen docs
-make install     # Install binary
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build                 # binary, plus docs if Doxygen is found
+cmake --build build --target docs   # API reference only
+sudo cmake --install build          # bin/ws2socket, share/man/man1/ws2socket.1
 ```
 
-## Implementation Details
+The project is compiled with `-Wall -Wextra -Wpedantic -Wstrict-prototypes` and
+links against `OpenSSL::SSL`, `OpenSSL::Crypto`, `ZLIB::ZLIB` and `pthread`.
+When Doxygen is available, the `docs` target is part of `ALL`.
 
-### Data Structures
+## Yocto integration
 
-#### Error Codes (common.h)
-```c
-#define WS_SUCCESS      0   // Success
-#define WS_ENOMEM      -2   // Out of memory
-#define WS_EINVAL      -3   // Invalid argument
-#define WS_ESOCKET     -5   // Socket error
-#define WS_ESSL        -6   // SSL/TLS error
-#define WS_EPROTO      -7   // Protocol error
-```
-
-#### WebSocket Connection (websocket.h)
-```c
-typedef struct websocket {
-    int state;              // Connection state
-    int sock_fd;            // TCP socket FD
-    SSL *ssl;               // SSL context
-    ws_buffer_t recv_buf;   // Receive buffer
-    ws_buffer_t send_buf;   // Send buffer
-    uint8_t *partial_msg;   // Fragmented message buffer
-    uint16_t close_code;    // Close frame code
-    char *close_reason;     // Close reason
-    // ... more fields
-} websocket_t;
-```
-
-#### Proxy Client (proxy.h)
-```c
-typedef struct {
-    websocket_t *ws;        // WebSocket to client
-    int target_fd;          // TCP socket to server
-    uint32_t client_id;     // Client identifier
-    ws_buffer_t send_buf;   // Buffered data
-    ws_buffer_t recv_buf;   // Buffered data
-    uint64_t bytes_sent;    // Statistics
-    uint64_t bytes_received;
-} proxy_client_t;
-```
-
-#### Circular Buffer (utils.h)
-```c
-typedef struct {
-    uint8_t *data;          // Buffer data
-    size_t read_pos;        // Read position
-    size_t write_pos;       // Write position
-    size_t capacity;        // Total size
-    pthread_mutex_t lock;   // Thread safety
-} ws_buffer_t;
-```
-
-### Utility Functions
-
-#### String Operations
-- `strcasecmp_safe()` - Case-insensitive comparison
-- `strlcpy()` - Safe string copy
-- `parse_hostport()` - Parse "host:port" format
-- `strtrim()` - Trim whitespace
-
-#### Cryptography
-- `base64_encode()` - Base64 encoding
-- `base64_decode()` - Base64 decoding
-- `sha1_digest()` - SHA1 hashing (RFC 6455 requirement)
-- `random_bytes()` - Random number generation
-
-#### Socket Operations
-- `socket_create_tcp()` - Create socket
-- `socket_connect()` - Connect to host:port
-- `socket_bind()` - Bind to address
-- `socket_listen()` - Start listening
-- `socket_accept()` - Accept connection
-- `socket_send()` - Send data
-- `socket_recv()` - Receive data
-- `socket_shutdown()` - Shutdown socket
-- `socket_close()` - Close socket
-- `socket_set_nonblocking()` - Non-blocking mode
-- `socket_set_timeout()` - Socket timeout
-- `socket_set_nodelay()` - TCP_NODELAY option
-- `socket_set_keepalive()` - SO_KEEPALIVE option
-- `socket_addr_to_string()` - Format address
-
-#### Circular Buffers
-- `buffer_init()` - Initialize buffer
-- `buffer_destroy()` - Free buffer
-- `buffer_write()` - Write data
-- `buffer_read()` - Read data
-- `buffer_available()` - Get available bytes
-- `buffer_is_empty()` - Check if empty
-- `buffer_clear()` - Clear buffer
-
-### Logging System
-
-Multi-target logging with levels:
-```c
-// Log levels
-LOG_DEBUG       // Detailed diagnostic info
-LOG_INFO        // General informational
-LOG_WARN        // Warning messages
-LOG_ERROR       // Error messages
-LOG_CRITICAL    // Critical errors
-
-// Log targets (combinable)
-LOG_TARGET_CONSOLE   // stderr output
-LOG_TARGET_FILE      // File output
-LOG_TARGET_SYSLOG    // System log
-
-// Convenience macros
-log_debug(fmt, ...)
-log_info(fmt, ...)
-log_warn(fmt, ...)
-log_error(fmt, ...)
-log_critical(fmt, ...)
-```
-
-### Configuration Parsing
-
-Command-line options:
-```
--h, --help                Print help
---version                 Print version
--l, --listen HOST[:PORT]  Listen address
--p, --port PORT           Listen port
--t, --target HOST:PORT    Default target
--c, --cert FILE           SSL certificate
--k, --key FILE            SSL private key
--v, --verbose             Verbose output
---log-file FILE           Log file path
---daemon                  Daemonize
---pid-file FILE           PID file path
-```
-
-### Daemonization
-
-The main application supports:
-- Two-fork daemonization pattern
-- PID file writing
-- Signal handlers (SIGINT, SIGTERM)
-- Graceful shutdown
-- Working directory change to "/"
-- File descriptor redirection to /dev/null
-
-## Yocto Integration
-
-### Bitbake Recipe Template
+ws2socket builds with the standard `cmake` class. A minimal recipe
+(`recipes-connectivity/ws2socket/ws2socket_0.1.0.bb`):
 
 ```bitbake
-SUMMARY = "WebSocket to TCP Socket Proxy"
-DESCRIPTION = "C implementation of WebSocket proxy for Yocto"
-LICENSE = "LGPL v3-only"
+SUMMARY = "WebSocket to TCP socket proxy"
+DESCRIPTION = "Lightweight C replacement for websockify, suitable for noVNC"
+LICENSE = "LGPL-3.0-or-later"
+LIC_FILES_CHKSUM = "file://COPYING;md5=<run md5sum COPYING>"
 
-SRC_URI = "file://ws2socket"
+SRC_URI = "git://<repository-url>;protocol=https;branch=main"
+SRCREV = "<commit>"
+S = "${WORKDIR}/git"
 
-DEPENDS = "openssl"
+DEPENDS = "openssl zlib"
 
 inherit cmake
 
-do_configure() {
-    cmake -B${B} -S${S}
-}
+# Skip the Doxygen target, even if doxygen-native happens to be available
+EXTRA_OECMAKE = "-DCMAKE_DISABLE_FIND_PACKAGE_Doxygen=ON"
 
-do_compile() {
-    cd ${B} && make
-}
-
-do_install() {
-    install -D -m 0755 ${B}/ws2socket ${D}${bindir}/ws2socket
-}
-
-FILES:${PN} = "${bindir}/ws2socket"
+FILES:${PN} += "${mandir}/man1/ws2socket.1"
 ```
 
-### Advantages for Yocto
+`cmake_do_install` already installs the binary and the man page, so no custom
+`do_install` is needed. Fill in the checksum with `md5sum COPYING`. The recipe
+has been written for Scarthgap (5.0) syntax.
 
-1. **No Python Dependency** - Pure C with only OpenSSL required
-2. **Minimal Size** - ~85 KB binary vs ~10+ MB with Python
-3. **Fast Startup** - Direct binary execution
-4. **Low Memory** - Efficient circular buffers
-5. **Embedded Ready** - Suitable for IoT/embedded systems
-6. **Standard Toolchain** - Uses CMake (familiar to Yocto)
+## Coding conventions
 
-## API Usage Examples
+- C11, 4-space indentation, K&R braces for control flow, and the function's
+  opening brace on its own line.
+- Every file starts with a Doxygen header (`@file`, `@brief`, `@author`,
+  `@copyright`) and an `SPDX-License-Identifier` line.
+- Every public function has a Doxygen block with `@brief`, `@param` and
+  `@return`.
+- Use `strlcpy()` from `utils.c` for bounded copies, and never `strcpy`.
+- Return `WS_*` codes, and log at the point where the error is detected.
 
-### Creating a WebSocket Server
+## Roadmap
 
-```c
-// Initialize logging
-logger_config_t logger_cfg = {
-    .level = LOG_INFO,
-    .targets = LOG_TARGET_CONSOLE | LOG_TARGET_FILE,
-    .logfile = "/tmp/ws2socket.log"
-};
-log_init(&logger_cfg);
+In rough priority order:
 
-// Create server
-ws_server_t *server = server_create();
-
-// Configure
-server_config_t config = {
-    .listen_host = "0.0.0.0",
-    .listen_port = 6080,
-    .use_ssl = 0,
-    .max_connections = 100,
-    .socket_timeout = 60
-};
-
-// Initialize and listen
-server_init(server, &config);
-server_listen(server);
-
-// Run server loop
-server_run(server, handle_client);
-```
-
-### Proxy Setup
-
-```c
-// Create proxy client
-proxy_client_t *client = proxy_client_create();
-
-// Connect to target
-proxy_connect_target(client, "target.example.com", 5900, 0);
-
-// Start proxying
-proxy_forward(client);
-
-// Cleanup
-proxy_client_destroy(client);
-```
-
-## Testing
-
-To test the build:
-
-```bash
-cd /dados/ws2tcp/ws2socket/build
-./ws2socket --help
-./ws2socket --version
-./ws2socket --listen 127.0.0.1:6080 --target 127.0.0.1:5900 --verbose
-```
-
-## TODO - Next Steps
-
-The implementation is now **production-ready**:
-
-### Completed ✅
-
-1. ✅ **WebSocket Frame Codec**
-   - Complete frame encode/decode logic
-   - Masking/unmasking per RFC 6455
-   - Control frame handling
-
-2. ✅ **HTTP Request Parsing**
-   - Full HTTP header parsing
-   - WebSocket upgrade validation
-   - Static file serving
-
-3. ✅ **Configuration File**
-   - INI-style file parsing
-   - All sections implemented
-   - Default value handling
-
-4. ✅ **Bidirectional Proxy**
-   - Complete forwarding logic
-   - select() event loop
-   - Statistics tracking
-
-### Remaining Work 🛠️
-
-1. **SSL/TLS Support** (framework ready)
-   - SSL context initialization in server_init()
-   - Certificate loading
-   - TLS handshake
-
-2. **Advanced Features**
-   - Test token file parsing for authentication
-   - Epoll/Kqueue for >1000 concurrent connections
-   - Systemd integration
-
-3. **Testing**
-   - Unit tests using C testing framework
-   - Integration tests with actual noVNC
-   - Load testing
-   - Fuzzing for security
-
-## Compiler Flags
-
-The project compiles with strict warnings:
-```cmake
--Wall -Wextra -Wpedantic -Wstrict-prototypes
-```
-
-Current warnings are deprecation warnings from OpenSSL 3.0 for SHA1 (used in RFC 6455 requirement), which can be suppressed if needed.
-
-## License
-
-All code is LGPL v3 compatible, matching the original websockify project.
-
-## Integration with Yocto Scarthgap 5
-
-The build system is ready for Yocto meta-layer integration:
-
-```bash
-# In your meta-layer
-# recipes-websocket/ws2socket/ws2socket_0.1.0.bb
-```
-
-The project follows standard:
-- CMake build system (native Yocto support)
-- Standard source layout
-- Minimal dependencies
-- LGPL license (Yocto-compatible)
-- Install targets
-- No Python dependencies
-
-## Documentation
-
-Full Doxygen documentation generated in `docs/html/`:
-- API reference for all functions
-- Data structure diagrams
-- Call graphs
-- File dependency graphs
-- Module organization
-- Search functionality
-
-Access with: `cd /dados/ws2tcp/ws2socket/build && firefox ../docs/html/index.html`
-
+1. Make native TLS work (`SSL_read`/`SSL_write` throughout, handshake in the
+   child).
+2. Advertise permessage-deflate only when the client offers it.
+3. Make command-line options override the config file.
+4. Wire in token-based target selection (websockify-compatible
+   `?token=` / `path` syntax).
+5. Add a test suite (frame codec, handshake, config parser) and fuzzing of the
+   HTTP and frame parsers.
+6. Move SHA-1 to the EVP API.
+7. Add an optional `/metrics` endpoint.
+8. Consider an `epoll` event loop for very high connection counts.

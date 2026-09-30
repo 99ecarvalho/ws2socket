@@ -1,356 +1,279 @@
-# ws2socket - WebSocket to TCP Socket Proxy
+# ws2socket
 
-A high-performance C implementation of a WebSocket to TCP socket proxy, designed for use with noVNC.
+[![License: LGPL v3+](https://img.shields.io/badge/license-LGPL--3.0--or--later-blue.svg)](COPYING)
+![Language: C11](https://img.shields.io/badge/language-C11-555.svg)
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
-## Overview
+**A small, dependency-light WebSocket-to-TCP proxy written in C.**
 
-**ws2socket** is a complete rewrite of the popular [websockify](https://github.com/novnc/websockify) project in C, providing:
+ws2socket lets a browser talk to any TCP service through a WebSocket. It
+accepts WebSocket connections, forwards the traffic unchanged to a TCP server,
+and can serve static files, so a single binary can host the
+[noVNC](https://github.com/novnc/noVNC) web client *and* bridge it to your VNC
+server.
 
-- **RFC 6455 WebSocket Protocol** - Full WebSocket protocol support
-- **SSL/TLS Support** - Secure connections via WSS:// protocol  
-- **Bidirectional Proxy** - Transparent proxying between WebSocket clients and TCP servers
-- **Token-Based Authentication** - Optional token validation for security
-- **Minimal Dependencies** - Only requires OpenSSL, zlib and libc
+It does the same job as [websockify](https://github.com/novnc/websockify), but
+it is a single ~90 KB native binary that needs only libc, pthreads, OpenSSL and
+zlib. That makes it a good fit for embedded Linux and Yocto images where
+shipping a Python runtime is not an option.
+
+```text
+ Browser (noVNC)                ws2socket                  TCP service
+┌──────────────┐  HTTP GET   ┌──────────────┐           ┌──────────────┐
+│              │────────────▶│ static files │           │              │
+│              │  WebSocket  │              │    TCP    │  VNC server  │
+│              │◀───────────▶│    proxy     │◀─────────▶│  :5900       │
+└──────────────┘   :6080     └──────────────┘           └──────────────┘
+```
+
+## Contents
+
+- [Features](#features)
+- [Project status](#project-status)
+- [Quick start](#quick-start)
+- [Building](#building)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Deployment notes](#deployment-notes)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Features
 
-✅ **Fully Implemented:**
-- WebSocket to TCP transparent proxying with RFC 6455 protocol
-- Complete WebSocket frame encoding/decoding with masking
-- HTTP server with static file serving (perfect for noVNC)
-- WebSocket secure (WSS) support framework (SSL/TLS ready)
-- Bidirectional proxy with select()-based event loop
-- INI-style configuration file support
-- Token-based authentication framework
-- Configurable listening host and port
-- Per-connection statistics (bytes sent/received)
-- Traffic logging and debugging
-- Ping/Pong control frames with auto-response
-- Graceful connection shutdown
-- Connection timeouts and keepalive
-- Comprehensive Doxygen documentation
-- CMake build system
-- Prometheus metrics
+- **RFC 6455 WebSocket server**: handshake, all three payload-length
+  encodings, unmasking, fragmented messages, ping/pong and close handling.
+- **Transparent TCP bridging**: bytes are forwarded as-is in both directions.
+- **permessage-deflate** (RFC 7692) compression, negotiated automatically.
+- **Built-in static file server** with the MIME types noVNC needs, and
+  path-traversal protection.
+- **Process-per-connection model**: a misbehaving client cannot take down
+  other sessions.
+- **INI configuration file** in addition to command-line options.
+- **Logging** to the console, a file and/or syslog, with five levels.
+- **Daemon mode** with a PID file.
+- **Small footprint**: C11 with no runtime dependencies beyond OpenSSL, zlib
+  and the C library.
+- **Yocto-friendly**: plain CMake build with an install target and a man page.
 
-🟡 **Framework Ready:**
-- SSL/TLS encryption (certificate/key loading stubbed)
+## Project status
 
-## Requirements
+ws2socket is **alpha** software (version 0.1.0). Plain `ws://` proxying and
+static file serving work and are used with noVNC. The following are known gaps
+you should be aware of before deploying:
 
-- OpenSSL library (libssl-dev)
-- Zlib
-- CMake >= 3.10
-- GCC or Clang compiler
-- Linux system (tested on Yocto/Embedded Linux)
+| Area | Status |
+|---|---|
+| `ws://` proxying | Working |
+| Static file serving | Working |
+| permessage-deflate | Working, but **always** advertised in the handshake. Clients that do not offer compression (browsers and Python `websockets` do; websocat does not) reject the connection. |
+| Native TLS (`wss://`) | **Incomplete.** The certificate loads and the TLS handshake runs, but data is not yet sent over the TLS session. Use a TLS-terminating reverse proxy for now. |
+| Token-based routing (`token_file`) | **Not implemented.** The option is parsed, but every client goes to the single configured target. |
+| Client authentication | None. Anyone who can reach the port can reach the target. |
+| Option precedence | Values in the config file override command-line options. |
+| Automated tests | Not yet available. |
+
+See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#known-limitations) for the
+full list.
+
+## Quick start
+
+```bash
+# Dependencies (Debian/Ubuntu)
+sudo apt-get install build-essential cmake libssl-dev zlib1g-dev
+
+# Build
+cmake -S . -B build
+cmake --build build
+
+# Proxy WebSocket clients on port 6080 to a VNC server on port 5900
+./build/ws2socket --listen 0.0.0.0:6080 --target 127.0.0.1:5900
+```
+
+For a step-by-step walkthrough, including serving noVNC, see
+**[QUICKSTART.md](QUICKSTART.md)**.
 
 ## Building
 
-### Standard Build
+### Requirements
+
+| Dependency | Version | Debian/Ubuntu package |
+|---|---|---|
+| C compiler (GCC or Clang) | C11 | `build-essential` |
+| CMake | 3.10 or newer | `cmake` |
+| OpenSSL | 1.1.1 or newer (3.x recommended) | `libssl-dev` |
+| zlib | any | `zlib1g-dev` |
+| Doxygen (optional, for API docs) | any | `doxygen` |
+
+ws2socket targets Linux. Other POSIX systems may work but are untested.
+
+### Compile
 
 ```bash
-cd ws2socket
-mkdir build
-cd build
-cmake ..
-make
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-### Installing
+The binary is written to `build/ws2socket`. If Doxygen is installed, the API
+reference is generated in `docs/html/` as part of the default build. You can
+also run it on its own with `cmake --build build --target docs`.
+
+### Install
 
 ```bash
-make install
+sudo cmake --install build            # installs under /usr/local by default
+sudo cmake --install build --prefix /usr
 ```
 
-The binary will be installed to `/usr/local/bin/ws2socket` by default.
-The man page will be installed to `/usr/local/share/man/man1/ws2socket.1`.
+This installs `bin/ws2socket` and the man page `share/man/man1/ws2socket.1`.
 
-### Viewing Documentation
+### Docker
 
-Man page:
-```bash
-man ws2socket
-```
-
-Doxygen API documentation:
-```bash
-cmake ..
-make docs
-```
-
-Documentation will be available in `docs/html/index.html`
+The [docker/](docker/) directory contains a Dockerfile and a helper script that
+build the project in a clean container. See [docker/README.md](docker/README.md).
 
 ## Usage
 
-### Basic Usage
+```text
+ws2socket [OPTIONS]
+
+  -h, --help                Print this help message
+      --version             Print version information
+  -l, --listen HOST[:PORT]  Listen address (default: 0.0.0.0:6080)
+  -p, --port PORT           Listen port (default: 6080)
+  -t, --target HOST:PORT    Target TCP server (required)
+  -w, --web-root DIR        Serve static files from DIR (e.g. noVNC)
+  -f, --config FILE         Read settings from an INI file
+  -c, --cert FILE           TLS certificate (PEM), see "Project status"
+  -k, --key FILE            TLS private key (PEM)
+  -v, --verbose             Debug logging
+      --log-file FILE       Also log to FILE
+      --daemon              Run in the background
+      --pid-file FILE       Write the daemon PID to FILE
+```
+
+### Examples
+
+Serve noVNC and proxy to a local VNC server:
 
 ```bash
-# Proxy WebSocket connections to localhost:5900
-ws2socket --listen 0.0.0.0:6080 --target 127.0.0.1:5900
+ws2socket --listen 0.0.0.0:6080 --target 127.0.0.1:5900 \
+          --web-root /usr/share/novnc
+# then open http://<host>:6080/vnc.html
 ```
 
-### With SSL/TLS
+Run as a daemon with a config file:
 
 ```bash
-# Secure WebSocket (WSS) proxy
-ws2socket --listen 0.0.0.0:443 \
-    --cert /path/to/cert.pem \
-    --key /path/to/key.pem \
-    --target 192.168.1.100:22
+ws2socket --config /etc/ws2socket.conf --daemon --pid-file /run/ws2socket.pid
 ```
 
-### Verbose Output
+Troubleshoot a connection with debug logging:
 
 ```bash
-# Enable debug logging
-ws2socket --verbose --log-file /tmp/ws2socket.log
+ws2socket --target 127.0.0.1:5900 --verbose --log-file /tmp/ws2socket.log
 ```
 
-### Using Configuration File
+Any HTTP request that is not a WebSocket upgrade is answered from `--web-root`,
+or with `426 Upgrade Required` if no web root is set. WebSocket upgrades are
+accepted on any path, so noVNC's default `/websockify` path works unchanged.
 
-```bash
-# Create config file (see ws2socket.conf.example)
-ws2socket --config /etc/ws2socket.conf
+## Configuration
 
-# Or combine with command-line options (CLI overrides config file)
-ws2socket --config /etc/ws2socket.conf --verbose --target 192.168.1.50:5901
+Settings can also be read from an INI-style file passed with `--config`. An
+annotated example is included as
+[ws2socket.conf.example](ws2socket.conf.example):
+
+```ini
+[general]
+daemon   = false
+pid_file = /var/run/ws2socket.pid
+
+[server]
+listen   = 0.0.0.0:6080
+web_root = /usr/share/novnc
+
+[proxy]
+target      = 127.0.0.1:5900
+buffer_size = 65536
+
+[logging]
+level   = info            ; debug, info, warning, error, critical
+file    = /var/log/ws2socket.log
+syslog  = false
 ```
 
-### Serving noVNC Static Files
+> [!NOTE]
+> The config file is read after the command line, so its values currently take
+> precedence over command-line options.
 
-```bash
-# Serve noVNC HTML/JS files from web root
-ws2socket --listen 0.0.0.0:6080 \
-    --target 127.0.0.1:5900 \
-    --web-root /usr/share/novnc
+The full list of keys is in the man page (`man ws2socket`).
 
-# Now browser can access: http://your-server:6080/vnc.html
-```
+## Deployment notes
 
-### Command-Line Options
+- **Put it behind a reverse proxy for anything public.** ws2socket does no
+  client authentication, and native TLS is not finished yet. Let nginx, Caddy
+  or HAProxy handle HTTPS and access control, and bind ws2socket to
+  `127.0.0.1`. An nginx example is in
+  [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx-tls).
+- **Under systemd, run in the foreground** (no `--daemon`) with `Type=simple`.
+  A sample unit file is in the noVNC guide.
+- **Yocto**: the project builds with `inherit cmake`. A sample recipe is in
+  [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#yocto-integration).
 
-```
--h, --help                Print this help message
---version                 Print version information
--l, --listen HOST[:PORT]  Listen address (default: 0.0.0.0:6080)
--p, --port PORT           Listen port (default: 6080)
--t, --target HOST:PORT    Default target server
--c, --cert FILE           SSL certificate file
--k, --key FILE            SSL private key file
--v, --verbose             Verbose output
--w, --web-root DIR        Web root directory for static files (noVNC)
--f, --config FILE         Configuration file path
---log-file FILE           Log file path
---daemon                  Daemonize process
---pid-file FILE           PID file path
-```
+## Documentation
 
-## Architecture
-
-### Directory Structure
-
-```
-ws2socket/
-├── CMakeLists.txt          # CMake build configuration
-├── Doxyfile.in             # Doxygen configuration template
-├── README.md               # This file
-├── include/                # Header files
-│   ├── common.h            # Common definitions and data structures
-│   ├── websocket.h         # WebSocket protocol implementation
-│   ├── server.h            # HTTP/WebSocket server
-│   ├── proxy.h             # TCP proxy functionality
-│   ├── utils.h             # Utility functions
-│   ├── config.h            # Configuration handling
-│   └── logging.h           # Logging system
-├── src/                    # Source files
-│   ├── websocket.c         # WebSocket protocol
-│   ├── server.c            # Server implementation
-│   ├── proxy.c             # Proxy implementation
-│   ├── utils.c             # Utility functions
-│   ├── config.c            # Configuration parsing
-│   ├── logging.c           # Logging implementation
-│   └── ws2socket.c         # Main application
-├── build/                  # Build directory (created by CMake)
-└── docs/                   # Documentation (generated)
-```
-
-### Main Components
-
-#### 1. **WebSocket Protocol** (`websocket.h/c`)
-Implements RFC 6455 WebSocket protocol with:
-- Server and client-side handshake
-- Frame encoding/decoding
-- Masking/unmasking
-- Control frames (ping, pong, close)
-- Continuation frames for large messages
-
-#### 2. **HTTP/WebSocket Server** (`server.h/c`)
-Handles:
-- HTTP request parsing
-- WebSocket upgrade request detection
-- SSL/TLS connections
-- Client connection management
-- Request/response handling
-
-#### 3. **TCP Proxy** (`proxy.h/c`)
-Manages:
-- WebSocket to TCP connection bridging
-- Bidirectional data forwarding
-- Connection statistics
-- Graceful shutdown
-- Target server connections
-
-#### 4. **Configuration** (`config.h/c`)
-Features:
-- Command-line argument parsing
-- Configuration file support (INI-style)
-- Validation and defaults
-- Usage information
-
-#### 5. **Utilities** (`utils.h/c`)
-Provides:
-- String handling (case-insensitive compare, trimming, parsing)
-- Base64 encoding/decoding
-- SHA1 hashing
-- Socket operations (create, bind, connect, etc.)
-- Circular buffer implementation
-- Cryptographic functions
-
-#### 6. **Logging** (`logging.h/c`)
-Offers:
-- Multi-level logging (DEBUG, INFO, WARN, ERROR, CRITICAL)
-- Multiple output targets (console, file, syslog)
-- Thread-safe logging
-- Timestamp support
-
-### Data Structures
-
-#### `websocket_t`
-Core WebSocket connection structure containing:
-- Socket file descriptor
-- SSL context
-- Send/receive buffers
-- Protocol state
-- Close frame information
-
-#### `proxy_client_t`
-Represents a proxied client connection:
-- WebSocket connection
-- Target TCP socket
-- Send/receive buffers
-- Connection statistics
-- Client identification
-
-#### `ws_server_t`
-Main server instance with:
-- Listen socket
-- Configuration
-- SSL context
-- Connection count tracking
-
-## Implementation Notes
-
-### Doxygen Comments
-
-All code uses comprehensive Doxygen-style documentation:
-
-```c
-/**
- * @file filename.h
- * @brief Short description
- * @author Eduardo Correia <ecorreia@apliant.com.br>
- * 
- * Longer description with details.
- * 
- * License: LGPL v3
- */
-
-/**
- * @brief Function description
- * 
- * Detailed explanation of what the function does.
- * 
- * @param param1 Description of first parameter
- * @param param2 Description of second parameter
- * @return Return value description
- * 
- * @note Optional notes
- * @see Related functions
- */
-```
-
-### Error Handling
-
-Error codes are defined in `common.h`:
-- `WS_SUCCESS` - Success
-- `WS_ENOMEM` - Out of memory
-- `WS_EINVAL` - Invalid argument
-- `WS_ESOCKET` - Socket error
-- `WS_ESSL` - SSL/TLS error
-
-All functions return error codes and use consistent error handling patterns.
-
-### Thread Safety
-
-The implementation is thread-safe where needed:
-- Circular buffers protected by mutex
-- Logging system thread-safe
-- Signal handlers used for graceful shutdown
-
-### Circular Buffers
-
-Custom circular buffer implementation (`ws_buffer_t`) for:
-- WebSocket frame queuing
-- Proxy data buffering
-- Thread-safe operation with mutex
-
-## Yocto Integration
-
-### Bitbake Recipe Example
-
-```bash
-SUMMARY = "WebSocket to TCP Socket Proxy"
-DESCRIPTION = "A C implementation of WebSocket proxy for embedded Linux"
-LICENSE = "LGPL v3-only"
-
-SRC_URI = "git://path/to/ws2socket.git;branch=main"
-
-DEPENDS = "openssl"
-
-inherit cmake
-
-EXTRA_OECMAKE = ""
-
-do_install:append() {
-    install -D -m 0755 ${B}/ws2socket ${D}${bindir}/ws2socket
-}
-```
-
-## Performance Considerations
-
-- Minimal memory overhead per connection
-- Efficient circular buffer implementation
-- Non-blocking socket operations ready
-- Select-based multiplexing for scalability
-- No dynamic allocations in hot paths (future optimization)
-
-## Security
-
-- Input validation on all APIs
-- Buffer overflow protection
-- Safe string handling
-- SSL/TLS support for encrypted connections
-- Optional token-based authentication framework
-
-## License
-
-LGPL v3 - See LICENSE file for details
+| Document | Contents |
+|---|---|
+| [QUICKSTART.md](QUICKSTART.md) | Build, run and connect in a few minutes |
+| [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md) | Serving noVNC, systemd, nginx/TLS, troubleshooting |
+| [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Architecture, source layout, limitations, Yocto recipe |
+| [docs/ws2socket.1](docs/ws2socket.1) | Man page (`man ./docs/ws2socket.1`) |
+| `docs/html/` | Doxygen API reference (generated at build time) |
 
 ## Contributing
 
-This is a complete implementation with Doxygen comments following the original websockify architecture while maintaining C-native design patterns.
+Contributions are welcome, whether bug reports, documentation fixes or code.
 
-## References
+1. Open an issue describing the bug or feature before starting larger changes.
+2. Keep the existing style: C11, K&R with 4-space indentation, and a Doxygen
+   comment on every public function.
+3. Make sure the build is warning-free with the project flags
+   (`-Wall -Wextra -Wpedantic -Wstrict-prototypes`).
+4. Add the standard copyright and SPDX header to new source files:
 
-- [RFC 6455 - The WebSocket Protocol](https://tools.ietf.org/html/rfc6455)
-- [websockify Project](https://github.com/novnc/websockify)
-- [Yocto Project](https://www.yoctoproject.org/)
+   ```c
+   /**
+    * @file example.c
+    * @brief One-line description
+    * @author Your Name <you@example.com>
+    *
+    * @copyright Copyright (c) 2026 Your Name <you@example.com>
+    *
+    * SPDX-License-Identifier: LGPL-3.0-or-later
+    */
+   ```
+
+The gaps listed under [Project status](#project-status), along with a test
+suite, are the most useful places to start.
+
+## License
+
+Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+
+ws2socket is free software: you can redistribute it and/or modify it under the
+terms of the **GNU Lesser General Public License, version 3 or (at your option)
+any later version**. See [COPYING](COPYING) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.
+
+## Acknowledgements
+
+- [websockify](https://github.com/novnc/websockify) and
+  [noVNC](https://github.com/novnc/noVNC), whose design ws2socket follows.
+- [RFC 6455](https://datatracker.ietf.org/doc/html/rfc6455) (The WebSocket
+  Protocol) and [RFC 7692](https://datatracker.ietf.org/doc/html/rfc7692)
+  (Compression Extensions for WebSocket).

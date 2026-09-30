@@ -1,371 +1,283 @@
-# ws2socket with noVNC Integration Guide
+# Using ws2socket with noVNC
 
-## Overview
+[noVNC](https://github.com/novnc/noVNC) is a VNC client that runs in the
+browser. Browsers cannot open raw TCP connections, so noVNC talks WebSocket and
+needs a proxy to reach the VNC server. ws2socket is that proxy, and it can
+serve the noVNC files as well, so one process does both jobs.
 
-ws2socket is with complete WebSocket protocol support and HTTP static file serving, making it perfect for noVNC deployments.
-
-## What's Implemented
-
-### ✅ Complete Features
-
-1. **WebSocket Protocol (RFC 6455)**
-   - SHA1 + Base64 handshake
-   - Frame encoding/decoding (all payload sizes)
-   - Client-to-server masking/unmasking
-   - Control frames: PING, PONG, CLOSE
-   - Binary and text frames
-
-2. **HTTP Server**
-   - Complete HTTP/1.1 request parsing
-   - Static file serving with proper MIME types
-   - Support for HTML, CSS, JavaScript, PNG, WASM, and more
-   - Directory traversal protection
-   - WebSocket upgrade detection
-
-3. **Bidirectional Proxy**
-   - select()-based event loop
-   - WebSocket ↔ TCP forwarding
-   - Statistics tracking (bytes sent/received)
-   - Configurable buffer sizes and timeouts
-
-4. **Configuration**
-   - Command-line argument parsing
-   - Web root directory support
-   - SSL/TLS certificate options (stub - needs implementation)
-   - Logging configuration
-   - Daemonization support
-
-## Quick Start with noVNC
-
-### 1. Download noVNC
-
-```bash
-git clone https://github.com/novnc/noVNC.git ./noVNC
+```text
+Browser ──HTTP GET /vnc.html──▶ ws2socket ── serves files from --web-root
+Browser ◀──── WebSocket ─────▶ ws2socket ◀──── TCP ────▶ VNC server :5900
 ```
 
-### 2. Build ws2socket
+If you have not built ws2socket yet, start with the
+[Quick Start](../QUICKSTART.md).
+
+## Contents
+
+- [Basic setup](#basic-setup)
+- [How a session works](#how-a-session-works)
+- [noVNC URL parameters](#novnc-url-parameters)
+- [Running as a systemd service](#running-as-a-systemd-service)
+- [Running behind nginx (TLS)](#running-behind-nginx-tls)
+- [Troubleshooting](#troubleshooting)
+
+## Basic setup
+
+### 1. Get noVNC
+
+Use a distribution package (installed as `/usr/share/novnc` on Debian and
+Ubuntu) or clone the upstream repository:
 
 ```bash
-cd /dados/ws2tcp/ws2socket
-mkdir -p build && cd build
-cmake ..
-make
+git clone --depth 1 https://github.com/novnc/noVNC.git /opt/novnc
 ```
 
-### 3. Start a VNC Server
+### 2. Start a VNC server
 
-If you don't have one running, start Xvnc or x11vnc:
+Any RFB-compatible server works. Keep it bound to localhost so it is only
+reachable through ws2socket.
+
+With **x11vnc**, sharing an existing X display (port 5900):
 
 ```bash
-# Example with Xvnc on display :1 (port 5901)
-Xvnc :1 -geometry 1280x720 -depth 24
-```
-
-If you prefer x11vnc
-```bash
-# Example with DISPLAY=172.23.128.1:4.0 (default port 5900)
-x11vnc -display $DISPLAY -nopw -noshm -localhost -forever -shared
-
-# Example with DISPLAY=172.23.128.1:4.0 (default port 5900) with password
+# Create a VNC password once
 mkdir -p ~/.vnc
 x11vnc -storepasswd ~/.vnc/passwd
 chmod 600 ~/.vnc/passwd
-x11vnc -display $DISPLAY -nopw -noshm -localhost -forever -shared -rfbauth ~/.vnc/passwd
+
+x11vnc -display :0 -localhost -forever -shared -rfbauth ~/.vnc/passwd
 ```
 
-### 4. Run ws2socket
+With **Xvnc** (TigerVNC), starting a virtual desktop on display `:1`
+(port 5901):
 
 ```bash
-./build/ws2socket \
-  --listen 0.0.0.0:6080 \
-  --target 127.0.0.1:5901 \
-  --web-root /path/to/novnc \
-  --verbose
+Xvnc :1 -geometry 1280x720 -depth 24 -localhost -SecurityTypes VncAuth \
+     -PasswordFile ~/.vnc/passwd
 ```
 
-**Note**: The `--web-root` option may need to be added to the command-line parser. See the "Adding web-root Option" section below.
-
-### 5. Access noVNC
-
-Open your browser to:
-```
-http://your-server:6080/vnc.html?host=your-server&port=6080
-```
-
-Or with auto-connect:
-```
-http://your-server:6080/vnc.html?host=your-server&port=6080&autoconnect=1
-```
-
-## How It Works
-
-1. **HTTP Request**: Browser requests `/vnc.html` → ws2socket serves from web_root
-2. **WebSocket Upgrade**: Browser sends WebSocket upgrade for `/websockify` → ws2socket performs handshake
-3. **VNC Connection**: ws2socket connects to VNC server (127.0.0.1:5901)
-4. **Bidirectional Proxy**: ws2socket forwards:
-   - WebSocket frames → TCP to VNC server
-   - TCP from VNC server → WebSocket frames to browser
-
-## noVNC URL Parameters
-
-The noVNC application supports URL parameters for controlling behavior and pre-configuring connections. Parameters can be passed as query strings or fragments.
-
-### Connection Parameters
-
-- **`host`** - The WebSocket host to connect to (deprecated, use `path`)
-- **`port`** - The WebSocket port to connect to (deprecated, use `path`)
-- **`path`** - The WebSocket URL (preferred method)
-- **`encrypt`** - Use TLS for WebSocket connection (deprecated, use `path`)
-
-### Auto-connect & Reconnection
-
-- **`autoconnect`** - Automatically connect as soon as the page loads (0 or 1)
-  - Example: `?autoconnect=1`
-- **`reconnect`** - Auto-reconnect if connection drops (default: true)
-- **`reconnect_delay`** - Milliseconds to wait before reconnecting
-
-### Session Control
-
-- **`password`** - Password for the VNC server
-- **`shared`** - Allow multiple clients to connect simultaneously (0 or 1)
-- **`view_only`** - Read-only mode, disables keyboard and mouse input (0 or 1)
-- **`repeaterID`** - VNC repeater ID if using a repeater proxy
-
-### Display Options
-
-- **`view_clip`** - Clip display to window or use scrollbars
-- **`resize`** - How to resize remote session: `off`, `scale`, or `remote`
-- **`quality`** - JPEG quality level (0-9, default varies)
-- **`compression`** - Compression level (0-9, default varies)
-
-### Other Options
-
-- **`bell`** - Enable/disable keyboard bell sounds (0 or 1)
-- **`logging`** - Console log level: `error`, `warn`, `info`, or `debug`
-
-### Usage Examples
-
-**Basic connection with auto-connect:**
-```
-http://localhost:6082/vnc.html?host=localhost&port=6082&autoconnect=1
-```
-
-**With multiple options:**
-```
-http://localhost:6082/vnc.html?host=localhost&port=6082&autoconnect=1&shared=1&quality=8
-```
-
-**Using fragment (not sent to server):**
-```
-http://localhost:6082/vnc.html#host=localhost&port=6082&autoconnect=1&view_only=0
-```
-
-**With password:**
-```
-http://localhost:6082/vnc.html?host=localhost&port=6082&autoconnect=1&password=MyPassword
-```
-
-### Configuration Files
-
-Parameters can also be set in configuration files:
-
-- **`defaults.json`** - Default settings (user can override)
-- **`mandatory.json`** - Mandatory settings (user cannot change)
-
-Example `defaults.json`:
-```json
-{
-    "autoconnect": true,
-    "reconnect": true,
-    "shared": false,
-    "quality": 8
-}
-```
-
-## MIME Types Supported
-
-The HTTP server currently supports these MIME types for noVNC:
-
-- `.html` → `text/html`
-- `.css` → `text/css`
-- `.js` → `application/javascript`
-- `.json` → `application/json`
-- `.png` → `image/png`
-- `.jpg`, `.jpeg` → `image/jpeg`
-- `.gif` → `image/gif`
-- `.svg` → `image/svg+xml`
-- `.ico` → `image/x-icon`
-- `.wasm` → `application/wasm`
-- `.ttf` → `font/ttf`
-- `.woff` → `font/woff`
-- `.woff2` → `font/woff2`
-- `.xml` → `application/xml`
-- `.txt` → `text/plain`
-
-## Architecture
-
-```
-Browser
-   |
-   | HTTP GET /vnc.html
-   v
-ws2socket (port 6080)
-   |--- Serves static files from web_root
-   |
-   | WebSocket Upgrade
-   v
-ws2socket
-   |
-   | Bidirectional Proxy
-   |
-   v
-VNC Server (port 5901)
-```
-
-## Testing
-
-### Test Static File Serving
+### 3. Start ws2socket
 
 ```bash
-curl -v http://localhost:6080/vnc.html
+ws2socket \
+    --listen 0.0.0.0:6080 \
+    --target 127.0.0.1:5900 \
+    --web-root /opt/novnc
 ```
 
-Should return the noVNC HTML file.
+Add `--verbose` while you are setting things up.
 
-### Test WebSocket Upgrade
+### 4. Open noVNC
 
-```bash
-# Using websocat
-websocat ws://localhost:6080/websockify
+Browse to:
+
+```text
+http://<server-address>:6080/vnc.html
 ```
 
-Should successfully establish WebSocket connection and proxy to VNC.
+By default noVNC connects to the host and port that served the page, on the
+path `websockify`. ws2socket accepts WebSocket upgrades on any path, so no
+extra settings are needed.
 
-### Monitor Logs
+## How a session works
 
-Run with `--verbose` to see:
-- HTTP requests received
-- WebSocket handshakes
-- Proxy connections
-- Data transfer statistics
+1. The browser requests `/vnc.html` and its scripts. ws2socket serves them from
+   `--web-root`.
+2. noVNC sends a WebSocket upgrade request to `/websockify`. ws2socket
+   completes the RFC 6455 handshake and forks a child process for the session.
+3. The child opens a TCP connection to `--target`.
+4. From then on, WebSocket frames from the browser are unwrapped and written to
+   the VNC server, and data from the VNC server is sent back as binary
+   WebSocket frames.
+5. When either side closes, the child logs traffic statistics and exits.
 
-## Production Deployment
+Each session runs in its own process. Several browsers can connect at once, as
+long as the VNC server allows shared sessions (for example `-shared` for
+x11vnc).
 
-### Systemd Service
+### Served file types
 
-Create `/etc/systemd/system/ws2socket.service`:
+The built-in HTTP server sends these content types:
+
+| Extension | Content-Type |
+|---|---|
+| `.html`, `.htm` | `text/html` |
+| `.css` | `text/css` |
+| `.js` | `application/javascript` |
+| `.json` | `application/json` |
+| `.png` | `image/png` |
+| `.jpg`, `.jpeg` | `image/jpeg` |
+| `.gif` | `image/gif` |
+| `.svg` | `image/svg+xml` |
+| `.ico` | `image/x-icon` |
+| `.wasm` | `application/wasm` |
+| `.txt` | `text/plain` |
+
+Anything else, such as noVNC's `.mp3` and `.oga` bell sounds, is sent as
+`application/octet-stream`. That is enough for noVNC to work. A request for a
+directory (a path ending in `/`) serves its `index.html`, and any path
+containing `..` is rejected.
+
+## noVNC URL parameters
+
+noVNC reads its settings from the query string or the fragment (`#`) of the
+page URL. The fragment is not sent to the server, which makes it the better
+place for a password. The parameters most useful with ws2socket are:
+
+| Parameter | Meaning |
+|---|---|
+| `autoconnect` | `true` to connect as soon as the page loads |
+| `path` | WebSocket path, relative to the page (default `websockify`) |
+| `host`, `port` | Override the WebSocket host and port (default: those of the page) |
+| `encrypt` | `true` to use `wss://`. Needed when noVNC is loaded over HTTPS. |
+| `password` | VNC password. Prefer the fragment form. |
+| `shared` | Ask the VNC server for a shared session (default `true`) |
+| `view_only` | `true` to disable keyboard and mouse input |
+| `resize` | `off`, `scale` or `remote` |
+| `quality`, `compression` | JPEG quality and compression level, `0` to `9` |
+| `reconnect`, `reconnect_delay` | Reconnect automatically, and the delay in ms |
+| `logging` | Browser console log level: `error`, `warn`, `info` or `debug` |
+
+Examples:
+
+```text
+http://vnc.example.com:6080/vnc.html?autoconnect=true&resize=scale
+http://vnc.example.com:6080/vnc.html#autoconnect=true&password=secret
+```
+
+The full list is in noVNC's
+[embedding documentation](https://github.com/novnc/noVNC/blob/master/docs/EMBEDDING.md).
+Site-wide defaults can also be set in `defaults.json` and `mandatory.json` in
+the noVNC directory.
+
+## Running as a systemd service
+
+systemd handles backgrounding itself, so run ws2socket in the foreground
+without `--daemon`. Save the following as
+`/etc/systemd/system/ws2socket.service`:
 
 ```ini
 [Unit]
-Description=WebSocket to TCP Socket Proxy
+Description=ws2socket WebSocket to TCP proxy
 After=network.target
 
 [Service]
 Type=simple
-User=vnc
-Group=vnc
-ExecStart=/usr/local/bin/ws2socket \
-  --listen 0.0.0.0:6080 \
-  --target 127.0.0.1:5901 \
-  --web-root /opt/novnc \
-  --log-file /var/log/ws2socket.log \
-  --daemon \
-  --pid-file /var/run/ws2socket.pid
+ExecStart=/usr/local/bin/ws2socket --config /etc/ws2socket.conf
 Restart=on-failure
 RestartSec=5s
+
+# Run unprivileged and restrict what the process can touch
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+A matching `/etc/ws2socket.conf` looks like this:
 
-```bash
-sudo systemctl enable ws2socket
-sudo systemctl start ws2socket
-sudo systemctl status ws2socket
+```ini
+[general]
+daemon = false
+
+[server]
+listen   = 127.0.0.1:6080
+web_root = /opt/novnc
+
+[proxy]
+target = 127.0.0.1:5900
+
+[logging]
+level   = info
+console = true
 ```
 
-### Security Considerations
+Logs go to the journal (`journalctl -u ws2socket`). If you prefer a log file,
+set `file =` under `[logging]` and add its directory to `ReadWritePaths=`.
 
-1. **No SSL/TLS for HTTP**: Current build doesn't have HTTPS implemented.
+Enable and start the service:
 
-2. **Nginx Reverse Proxy** (recommended for production):
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ws2socket
+systemctl status ws2socket
+```
+
+## Running behind nginx (TLS)
+
+ws2socket does not authenticate clients, and its native TLS support is not
+finished yet (see [Known limitations](IMPLEMENTATION.md#known-limitations)).
+For anything reachable from an untrusted network, bind ws2socket to localhost
+and let a reverse proxy handle TLS and access control:
 
 ```nginx
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name vnc.example.com;
-    
-    ssl_certificate /etc/ssl/certs/vnc.example.com.crt;
+
+    ssl_certificate     /etc/ssl/certs/vnc.example.com.crt;
     ssl_certificate_key /etc/ssl/private/vnc.example.com.key;
-    
+
+    # Optional: require a login before anyone can reach VNC
+    # auth_basic           "VNC";
+    # auth_basic_user_file /etc/nginx/vnc.htpasswd;
+
     location / {
-        proxy_pass http://localhost:6080;
+        proxy_pass http://127.0.0.1:6080;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Upgrade    $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Host       $host;
+
+        # Keep idle VNC sessions open
+        proxy_read_timeout  1h;
+        proxy_send_timeout  1h;
     }
 }
 ```
 
-3. **Firewall**: Only expose ws2socket to localhost, let nginx/Apache handle external connections.
+Then open `https://vnc.example.com/vnc.html`. noVNC detects the HTTPS page and
+uses `wss://` automatically.
 
-## Future Enhancements
-
-### High Priority
-- [ ] Native SSL/TLS support (implement `server_init()` SSL context)
-
-### Medium Priority
-- [ ] Test token-based authentication
-
-### Low Priority
-- [ ] Connection limits and rate limiting
-- [ ] Health check endpoint
+On nginx older than 1.25.1, replace `listen 443 ssl;` and `http2 on;` with
+`listen 443 ssl http2;`.
 
 ## Troubleshooting
 
-### Issue: "Failed to parse target server"
+**The browser shows `426 Upgrade Required`.**
+ws2socket was started without `--web-root`, so it only accepts WebSocket
+connections.
 
-Ensure target is in format `host:port`:
-```bash
---target 127.0.0.1:5901
-```
+**`404 Not Found` for `vnc.html`.**
+`--web-root` must point at the directory that contains `vnc.html`. Check with
+`ls <web-root>/vnc.html`.
 
-### Issue: "404 Not Found" for static files
+**noVNC shows "Failed to connect to server".**
 
-Check web_root is set and contains noVNC files:
-```bash
-ls /path/to/novnc/vnc.html
-```
+1. Check that the VNC server is listening: `ss -ltn | grep 590`.
+2. Check that the target is reachable from the ws2socket host:
+   `nc -vz 127.0.0.1 5900`.
+3. Restart ws2socket with `--verbose` and look for
+   `Failed to connect to target`.
+4. Open the browser developer tools (Network tab, WS filter) and check the
+   handshake. A successful handshake returns status `101`.
 
-### Issue: WebSocket connection fails
+**The connection drops after about a minute of inactivity behind a proxy.**
+Raise the proxy's read timeout, for example `proxy_read_timeout` in nginx as
+shown above.
 
-1. Check VNC server is running: `netstat -tlnp | grep 5901`
-2. Check ws2socket can connect: `telnet 127.0.0.1 5901`
-3. Check WebSocket handshake in browser dev tools (Network tab)
-
-### Issue: "Connection refused" to VNC
-
-VNC server not running or wrong port. Check with:
-```bash
-ps aux | grep vnc
-netstat -tlnp | grep vnc
-```
-
-## Performance Notes
-
-- **Buffer size**: Default 16KB, configurable via `proxy.buffer_size`
-- **Connection timeout**: Default 60s, configurable via `server.socket_timeout`
-- **select() based**: Handles ~1000 concurrent connections efficiently
-- **No threading**: Single process, event-driven architecture
-
-For high concurrency (>1000 connections), we consider implementing epoll/kqueue support.
+**Changing `--target` has no effect.**
+If you also pass `--config`, the `target` value in the file takes precedence
+over the command line.
 
 ## References
 
-- [noVNC GitHub](https://github.com/novnc/noVNC)
-- [RFC 6455 - WebSocket Protocol](https://tools.ietf.org/html/rfc6455)
-- [websockify](https://github.com/novnc/websockify) - Original Python implementation
+- [noVNC](https://github.com/novnc/noVNC)
+- [websockify](https://github.com/novnc/websockify), the original Python proxy
+- [RFC 6455: The WebSocket Protocol](https://datatracker.ietf.org/doc/html/rfc6455)
