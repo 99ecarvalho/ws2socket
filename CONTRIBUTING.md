@@ -21,8 +21,7 @@ little back-and-forth as possible.
 - **Fix a known limitation.** The
   [Known limitations](docs/IMPLEMENTATION.md#known-limitations) and
   [Roadmap](docs/IMPLEMENTATION.md#roadmap) sections list the most useful
-  work. Native TLS, correct permessage-deflate negotiation and a test suite are
-  the top priorities.
+  work. Fuzzing and unit tests for the parsers are the top priorities.
 - **Test on your platform.** Reports from other distributions, embedded
   boards, and Yocto builds help a lot.
 
@@ -70,15 +69,27 @@ For an overview of the code, read [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.m
 
 ### Testing your change
 
-There is no automated test suite yet. Adding one is a welcome contribution.
-Until then, check your change by hand:
+The integration tests in [tests/](tests/) start the built binary and drive it
+with real WebSocket clients. They need Python 3 with the `websockets` package,
+and the `openssl` command for the TLS tests:
+
+```bash
+sudo apt-get install python3-websockets openssl
+ctest --test-dir build --output-on-failure
+python3 tests/test_integration.py build/ws2socket -k token   # a subset
+```
+
+Before opening a pull request:
 
 1. Build with no new compiler warnings.
-2. Run the echo test from [QUICKSTART.md](QUICKSTART.md#3-try-it-with-a-simple-tcp-service)
-   and confirm that data round-trips.
-3. If your change touches HTTP or noVNC behavior, connect with noVNC in a
+2. Run the whole test suite. Also run it against the sanitizer build if you
+   touched parsing or memory handling:
+   `ASAN_OPTIONS=detect_leaks=0 python3 tests/test_integration.py build-asan/ws2socket`.
+3. **Add a test** for a bug fix (one that fails without the fix) or for a new
+   feature. Each test is a plain `test_*` function in `test_integration.py`.
+4. If your change touches HTTP or noVNC behavior, also connect with noVNC in a
    browser as described in [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md).
-4. If you changed the Docker files, run `docker/build.sh`.
+5. If you changed the Docker files, run `docker/build.sh`.
 
 Describe what you tested in the pull request.
 
@@ -147,10 +158,10 @@ Common types are `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`,
 and `chore`. For example:
 
 ```text
-fix(websocket): only advertise permessage-deflate when offered
+fix(http): return 404 for directories without a trailing slash
 
-RFC 6455 section 9.1 requires the client to fail the connection if the
-server accepts an extension it did not request.
+open() succeeds on a directory, so the server sent a 200 header with
+the directory size and no body.
 ```
 
 Keep the summary line under about 72 characters. Make each commit build on
@@ -161,7 +172,7 @@ its own.
 Before you open a pull request, check that:
 
 - [ ] the project builds with no new warnings;
-- [ ] you tested the change as described in [Testing your change](#testing-your-change);
+- [ ] the test suite passes, and the change has a test where practical;
 - [ ] documentation and `--help` reflect any change in behavior;
 - [ ] new files carry the copyright and SPDX header;
 - [ ] commits follow the commit message convention.

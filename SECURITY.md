@@ -52,7 +52,9 @@ Examples of what we consider vulnerabilities:
 - serving files outside `--web-root` (path traversal);
 - crashes or resource exhaustion that one unauthenticated client can trigger
   and that affect other sessions or the listener;
-- ways to make ws2socket connect somewhere other than the configured target.
+- ways to make ws2socket connect somewhere other than the configured target,
+  or other than the target of the token presented;
+- ways to bypass TLS, `max_connections` or token checks.
 
 ### Known limitations
 
@@ -61,22 +63,27 @@ vulnerabilities. See
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#known-limitations) for
 details.
 
-- ws2socket does **not authenticate clients**. Anyone who can reach the
-  listening port can reach the target.
-- **Native TLS is incomplete**, so `wss://` does not work yet.
-- `max_connections` is not enforced.
+- ws2socket does **not authenticate users**. Without a token file, anyone who
+  can reach the listening port can reach the target. With one, anyone who
+  knows a valid token can.
+- Tokens are bearer secrets carried in the URL. Browsers may keep them in
+  history, and proxies may log them.
 
 Reports that show how these limitations can be exploited *beyond* the
 documented behavior are still welcome.
 
 ## Deploying ws2socket safely
 
-Until the limitations above are addressed:
-
-- Bind ws2socket to `127.0.0.1`, or restrict access with a firewall.
-- Put a reverse proxy (nginx, Caddy, HAProxy) in front of it for TLS and
+- Enable TLS (`--cert`/`--key`) on any network you do not fully trust.
+  Otherwise VNC traffic and tokens travel in the clear.
+- Restrict who can reach the port with a firewall, or bind ws2socket to
+  `127.0.0.1` behind a reverse proxy (nginx, Caddy, HAProxy) that adds
   authentication. An example is in
-  [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx-tls).
+  [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx).
+- When using a token file, generate long random tokens
+  (`openssl rand -hex 16`), and keep the file readable only by the ws2socket
+  user.
+- Keep `max_connections` at a level your system can handle.
 - Run it as an unprivileged user. The systemd unit in the noVNC guide and the
   Docker image both do this.
 - Protect the target service with its own authentication, such as a VNC

@@ -18,8 +18,10 @@ If you have not built ws2socket yet, start with the
 - [Basic setup](#basic-setup)
 - [How a session works](#how-a-session-works)
 - [noVNC URL parameters](#novnc-url-parameters)
+- [Serving over TLS](#serving-over-tls)
+- [Several VNC servers with tokens](#several-vnc-servers-with-tokens)
 - [Running as a systemd service](#running-as-a-systemd-service)
-- [Running behind nginx (TLS)](#running-behind-nginx-tls)
+- [Running behind nginx](#running-behind-nginx)
 - [Troubleshooting](#troubleshooting)
 
 ## Basic setup
@@ -151,6 +153,62 @@ The full list is in noVNC's
 Site-wide defaults can also be set in `defaults.json` and `mandatory.json` in
 the noVNC directory.
 
+## Serving over TLS
+
+Give ws2socket a certificate and key in PEM format, and it serves both the
+noVNC page (`https://`) and the WebSocket (`wss://`) over TLS:
+
+```bash
+ws2socket \
+    --listen 0.0.0.0:6080 \
+    --target 127.0.0.1:5900 \
+    --web-root /opt/novnc \
+    --cert /etc/ssl/certs/vnc.example.com.pem \
+    --key /etc/ssl/private/vnc.example.com.key
+```
+
+Open `https://vnc.example.com:6080/vnc.html`. noVNC sees that the page was
+loaded over HTTPS and uses `wss://` automatically. With TLS enabled, plain
+`http://` and `ws://` connections are refused.
+
+The certificate file may contain the full chain (server certificate first).
+TLS 1.2 is the minimum version accepted. The key must be readable by the user
+ws2socket runs as.
+
+## Several VNC servers with tokens
+
+One ws2socket instance can front many VNC servers. Instead of `--target`, give
+it a token file that maps a token to each server. It uses the same format as
+websockify's `TokenFile` plugin:
+
+```text
+# /etc/ws2socket/tokens
+desktop1: 192.168.1.10:5900
+desktop2: 192.168.1.11:5900
+lab-pc:   lab-pc.internal:5901
+```
+
+```bash
+ws2socket --token-file /etc/ws2socket/tokens --web-root /opt/novnc
+```
+
+Clients choose a server by passing the token in the WebSocket URL. In noVNC,
+use the `path` parameter:
+
+```text
+http://vnc.example.com:6080/vnc.html?path=websockify%3Ftoken%3Ddesktop1
+```
+
+- The token is read from the `token` query parameter, or else from the first
+  path component (`/desktop1`).
+- Requests with a missing or unknown token get `403 Forbidden`.
+- `--token-file` can also name a directory, in which case every file in it is
+  read. Edits are picked up automatically within about a minute, without a
+  restart.
+- Tokens decide where a client connects, so treat them like passwords: make
+  them long and random (for example `openssl rand -hex 16`), and use TLS so
+  they are not sent in the clear.
+
 ## Running as a systemd service
 
 systemd handles backgrounding itself, so run ws2socket in the foreground
@@ -208,12 +266,11 @@ sudo systemctl enable --now ws2socket
 systemctl status ws2socket
 ```
 
-## Running behind nginx (TLS)
+## Running behind nginx
 
-ws2socket does not authenticate clients, and its native TLS support is not
-finished yet (see [Known limitations](IMPLEMENTATION.md#known-limitations)).
-For anything reachable from an untrusted network, bind ws2socket to localhost
-and let a reverse proxy handle TLS and access control:
+ws2socket does not authenticate users. To require a login, or to share port
+443 with other sites, bind ws2socket to localhost and let a reverse proxy
+handle TLS and access control:
 
 ```nginx
 server {
@@ -264,7 +321,7 @@ connections.
 2. Check that the target is reachable from the ws2socket host:
    `nc -vz 127.0.0.1 5900`.
 3. Restart ws2socket with `--verbose` and look for
-   `Failed to connect to target`.
+   `Failed to connect to target`. The browser sees this as `502 Bad Gateway`.
 4. Open the browser developer tools (Network tab, WS filter) and check the
    handshake. A successful handshake returns status `101`.
 
@@ -272,9 +329,16 @@ connections.
 Raise the proxy's read timeout, for example `proxy_read_timeout` in nginx as
 shown above.
 
-**Changing `--target` has no effect.**
-If you also pass `--config`, the `target` value in the file takes precedence
-over the command line.
+**The client gets `403 Forbidden`.**
+A token file is in use, and the WebSocket URL has no token or an unknown one.
+Check the `path` parameter in the noVNC URL.
+
+**The client gets `502 Bad Gateway`.**
+ws2socket could not connect to the target. See the previous item.
+
+**The client gets `503 Service Unavailable`.**
+`max_connections` clients are already connected. Raise the limit under
+`[server]` if needed.
 
 ## References
 

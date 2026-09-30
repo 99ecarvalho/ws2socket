@@ -46,11 +46,17 @@ shipping a Python runtime is not an option.
 - **RFC 6455 WebSocket server**: handshake, all three payload-length
   encodings, unmasking, fragmented messages, ping/pong and close handling.
 - **Transparent TCP bridging**: bytes are forwarded as-is in both directions.
-- **permessage-deflate** (RFC 7692) compression, negotiated automatically.
+- **Native TLS**: serve `https://` and `wss://` directly with a PEM
+  certificate and key.
+- **Token-based routing**: one instance can front many VNC servers, using
+  websockify-compatible token files (`?token=...`).
+- **permessage-deflate** (RFC 7692) compression, negotiated when the client
+  offers it.
 - **Built-in static file server** with the MIME types noVNC needs, and
   path-traversal protection.
 - **Process-per-connection model**: a misbehaving client cannot take down
-  other sessions.
+  other sessions. The number of simultaneous clients is capped by
+  `max_connections`.
 - **INI configuration file** in addition to command-line options.
 - **Logging** to the console, a file and/or syslog, with five levels.
 - **Daemon mode** with a PID file.
@@ -60,23 +66,21 @@ shipping a Python runtime is not an option.
 
 ## Project status
 
-ws2socket is **alpha** software (version 0.1.0). Plain `ws://` proxying and
-static file serving work and are used with noVNC. The following are known gaps
-you should be aware of before deploying:
+ws2socket is **alpha** software (version 0.1.0). The core features work and
+are covered by an end-to-end test suite, but the project is young, and its
+interfaces may still change before 1.0.
 
-| Area | Status |
-|---|---|
-| `ws://` proxying | Working |
-| Static file serving | Working |
-| permessage-deflate | Working, but **always** advertised in the handshake. Clients that do not offer compression (browsers and Python `websockets` do; websocat does not) reject the connection. |
-| Native TLS (`wss://`) | **Incomplete.** The certificate loads and the TLS handshake runs, but data is not yet sent over the TLS session. Use a TLS-terminating reverse proxy for now. |
-| Token-based routing (`token_file`) | **Not implemented.** The option is parsed, but every client goes to the single configured target. |
-| Client authentication | None. Anyone who can reach the port can reach the target. |
-| Option precedence | Values in the config file override command-line options. |
-| Automated tests | Not yet available. |
+Known limitations:
 
-See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#known-limitations) for the
-full list.
+- **No user authentication.** Tokens select a target, but anyone who knows a
+  token can use it. For untrusted networks, add authentication in a reverse
+  proxy. See [SECURITY.md](SECURITY.md).
+- **Minimal HTTP server.** There is no keep-alive, `HEAD` or range request
+  support, and no URL decoding of file names. It is enough for noVNC.
+- **Metrics** are collected internally but not yet exported.
+
+See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#known-limitations) for
+details.
 
 ## Quick start
 
@@ -131,6 +135,20 @@ sudo cmake --install build --prefix /usr
 
 This installs `bin/ws2socket` and the man page `share/man/man1/ws2socket.1`.
 
+### Run the tests
+
+The integration tests start the built binary and exercise it with real
+WebSocket clients. They need Python 3 with the
+[websockets](https://pypi.org/project/websockets/) package, plus the
+`openssl` command for the TLS tests:
+
+```bash
+sudo apt-get install python3-websockets openssl
+ctest --test-dir build --output-on-failure
+# or, with per-test output:
+python3 tests/test_integration.py build/ws2socket
+```
+
 ### Docker
 
 The [docker/](docker/) directory builds a small runtime image (about 80 MB,
@@ -151,12 +169,13 @@ ws2socket [OPTIONS]
 
   -h, --help                Print this help message
       --version             Print version information
-  -l, --listen HOST[:PORT]  Listen address (default: 0.0.0.0:6080)
+  -l, --listen HOST[:PORT]  Listen address or port (default: 0.0.0.0:6080)
   -p, --port PORT           Listen port (default: 6080)
-  -t, --target HOST:PORT    Target TCP server (required)
+  -t, --target HOST:PORT    Target TCP server
+      --token-file FILE     Choose the target per client from a token file
   -w, --web-root DIR        Serve static files from DIR (e.g. noVNC)
   -f, --config FILE         Read settings from an INI file
-  -c, --cert FILE           TLS certificate (PEM), see "Project status"
+  -c, --cert FILE           TLS certificate (PEM), enables https:// and wss://
   -k, --key FILE            TLS private key (PEM)
   -v, --verbose             Debug logging
       --log-file FILE       Also log to FILE
@@ -174,6 +193,24 @@ ws2socket --listen 0.0.0.0:6080 --target 127.0.0.1:5900 \
 # then open http://<host>:6080/vnc.html
 ```
 
+Serve over TLS (`https://` and `wss://`):
+
+```bash
+ws2socket --cert /etc/ssl/certs/vnc.pem --key /etc/ssl/private/vnc.key \
+          --target 127.0.0.1:5900 --web-root /usr/share/novnc
+```
+
+Front several VNC servers with one instance, using a token file:
+
+```bash
+cat > /etc/ws2socket/tokens <<'TOKENS'
+desktop1: 192.168.1.10:5900
+desktop2: 192.168.1.11:5900
+TOKENS
+ws2socket --token-file /etc/ws2socket/tokens --web-root /usr/share/novnc
+# then open http://<host>:6080/vnc.html?path=websockify%3Ftoken%3Ddesktop1
+```
+
 Run as a daemon with a config file:
 
 ```bash
@@ -189,6 +226,7 @@ ws2socket --target 127.0.0.1:5900 --verbose --log-file /tmp/ws2socket.log
 Any HTTP request that is not a WebSocket upgrade is answered from `--web-root`,
 or with `426 Upgrade Required` if no web root is set. WebSocket upgrades are
 accepted on any path, so noVNC's default `/websockify` path works unchanged.
+A client whose target cannot be reached gets `502 Bad Gateway`.
 
 ## Configuration
 
@@ -206,8 +244,7 @@ listen   = 0.0.0.0:6080
 web_root = /usr/share/novnc
 
 [proxy]
-target      = 127.0.0.1:5900
-buffer_size = 65536
+target = 127.0.0.1:5900
 
 [logging]
 level   = info            ; debug, info, warning, error, critical
@@ -215,19 +252,19 @@ file    = /var/log/ws2socket.log
 syslog  = false
 ```
 
-> [!NOTE]
-> The config file is read after the command line, so its values currently take
-> precedence over command-line options.
-
-The full list of keys is in the man page (`man ws2socket`).
+Command-line options override values from the file, so a shared config can be
+adjusted per run (for example `--config site.conf --verbose`). Invalid values
+are reported with their file name and line number. The full list of keys is in
+the man page (`man ws2socket`).
 
 ## Deployment notes
 
-- **Put it behind a reverse proxy for anything public.** ws2socket does no
-  client authentication, and native TLS is not finished yet. Let nginx, Caddy
-  or HAProxy handle HTTPS and access control, and bind ws2socket to
-  `127.0.0.1`. An nginx example is in
-  [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx-tls).
+- **Use TLS and restrict access for anything public.** ws2socket can
+  terminate TLS itself (`--cert`/`--key`), but it does no user
+  authentication. On untrusted networks, put a reverse proxy (nginx, Caddy,
+  HAProxy) in front for authentication, or limit access with a firewall. An
+  nginx example is in
+  [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx).
 - **Under systemd, run in the foreground** (no `--daemon`) with `Type=simple`.
   A sample unit file is in the noVNC guide.
 - **Yocto**: the project builds with `inherit cmake`. A sample recipe is in

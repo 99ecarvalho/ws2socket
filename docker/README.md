@@ -74,6 +74,21 @@ docker run --rm -p 6080:6080 \
 
 Then open `http://localhost:6080/vnc.html`.
 
+### Serving over TLS
+
+Mount the certificate and key read-only. The container runs as the
+unprivileged `ws2socket` user (UID 999), so both files must be readable by
+that UID, for example with `chown 999 privkey.pem && chmod 0400 privkey.pem`:
+
+```bash
+docker run --rm -p 6080:6080 \
+    -v /etc/ws2socket/tls:/tls:ro \
+    ws2socket --target vnc-host:5900 \
+              --cert /tls/fullchain.pem --key /tls/privkey.pem
+```
+
+Clients then connect with `https://` and `wss://`.
+
 ### Using a configuration file
 
 An annotated example is included at `/etc/ws2socket/ws2socket.conf.example`.

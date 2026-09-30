@@ -1,64 +1,64 @@
 # Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
-# ws2socket Configuration File Example
-# This is an INI-style configuration file
-# Lines starting with # or ; are comments
+# ws2socket configuration file example
+#
+# INI-style: [section] headers and "key = value" lines.
+# Text after # or ; is a comment. Booleans: true/false, yes/no, on/off, 1/0.
 #
 # Load it with: ws2socket --config /path/to/ws2socket.conf
-# Note: values in this file override command-line options.
+# Command-line options override values in this file.
 
 [general]
-# Run as daemon in background
+# Run in the background (leave false under systemd or Docker)
 daemon = false
 
-# PID file path (when running as daemon)
+# PID file written when running as a daemon
 pid_file = /var/run/ws2socket.pid
 
-# Token file (parsed, but token-based routing is not implemented yet)
-# token_file = /etc/ws2socket/tokens.txt
+# Route each client by token instead of using [proxy] target.
+# File format, one per line:   token: host:port
+# Clients connect to /websockify?token=TOKEN; unknown tokens get 403.
+# token_file = /etc/ws2socket/tokens
 
 [server]
-# Listen address and port
+# Listen address and port (or just a port number)
 listen = 0.0.0.0:6080
-# Or specify port separately:
+# Or specify the port separately:
 # port = 6080
 
-# SSL/TLS certificate and key files (optional, for wss://)
+# TLS certificate and key (PEM). When set, clients must use https:// and wss://
 # cert_file = /etc/ssl/certs/ws2socket.crt
 # key_file = /etc/ssl/private/ws2socket.key
 
-# Maximum concurrent connections
-max_connections = 100
+# Maximum simultaneous clients (0 = no limit); extra clients get 503
+max_connections = 1024
 
-# Socket timeout in seconds
+# Seconds a client may stall the TLS handshake, its HTTP request or a frame
 socket_timeout = 60
 
-# Web root directory for static files (e.g., noVNC)
-web_root = /usr/share/novnc
+# Directory of static files to serve, e.g. noVNC
+# web_root = /usr/share/novnc
 
 [proxy]
-# Default target server (VNC, SSH, etc.)
-target = 127.0.0.1:5901
+# Target TCP server (VNC, SSH, ...). Not needed with token_file.
+target = 127.0.0.1:5900
 
-# Buffer size for data transfer (bytes)
-buffer_size = 16384
+# Largest WebSocket message accepted from a client, in bytes
+buffer_size = 1048576
 
-# Maximum proxy connections
-max_connections = 50
-
-# Proxy socket timeout in seconds
+# Seconds allowed to connect to the target and for it to accept data
 socket_timeout = 60
 
 [logging]
 # Log level: debug, info, warning, error, critical
 level = info
 
-# Log to file
-file = /var/log/ws2socket.log
-
-# Log to console (true/false or 1/0)
+# Log to console (stderr)
 console = true
 
-# Log to syslog (true/false or 1/0)
+# Also log to a file (the directory must be writable)
+# file = /var/log/ws2socket.log
+
+# Log to syslog (facility LOCAL0)
 syslog = false

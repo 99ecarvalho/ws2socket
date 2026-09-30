@@ -10,8 +10,11 @@ ws2socket \- WebSocket to TCP socket proxy with static file serving
 .IR host [: port ]]
 .RB [ \-p
 .IR port ]
-.B \-t
+.RB { \-t
 .IR host : port
+|
+.B \-\-token\-file
+.IR file }
 .RB [ \-w
 .IR dir ]
 .RB [ \-f
@@ -33,8 +36,10 @@ It depends only on the C library, POSIX threads, OpenSSL and zlib.
 Each accepted client is handled in a separate child process.
 Plain HTTP requests are answered from the web root (or with
 .B 426 Upgrade Required
-when no web root is set); WebSocket upgrade requests on any path are
-accepted and bridged to the configured target.
+when no web root is set).
+WebSocket upgrade requests on any path are accepted and bridged to the
+configured target, or to the target named by the client's token when a
+token file is used.
 .SH OPTIONS
 .TP
 .BR \-h ", " \-\-help
@@ -43,8 +48,10 @@ Print a usage summary and exit.
 .B \-\-version
 Print version, copyright and license information and exit.
 .TP
-.BR \-l ", " \-\-listen " \fIhost\fR[:\fIport\fR]"
+.BR \-l ", " \-\-listen " \fIhost\fR[:\fIport\fR] | \fIport\fR"
 Address to listen on.
+A bare number is taken as the port; IPv6 addresses are written in
+brackets, for example \fB[::1]:6080\fR.
 Default: \fB0.0.0.0:6080\fR.
 .TP
 .BR \-p ", " \-\-port " \fIport\fR"
@@ -54,8 +61,14 @@ Default: \fB6080\fR.
 .BR \-t ", " \-\-target " \fIhost\fR:\fIport\fR"
 TCP server that WebSocket traffic is forwarded to, for example a VNC
 server at \fB127.0.0.1:5900\fR.
-A target is required, either on the command line or in the
-configuration file.
+Either a target or a token file is required.
+.TP
+.BI \-\-token\-file " file"
+Choose the target for each client from \fIfile\fR instead of using a
+single \fB\-\-target\fR.
+See
+.B TOKEN FILE
+below.
 .TP
 .BR \-w ", " \-\-web\-root " \fIdir\fR"
 Serve static files from \fIdir\fR for non\-WebSocket HTTP requests.
@@ -69,8 +82,8 @@ below.
 .TP
 .BR \-c ", " \-\-cert " \fIfile\fR"
 TLS certificate in PEM format.
-See
-.BR BUGS .
+With \fB\-\-cert\fR and \fB\-\-key\fR, all connections use TLS
+(\fBhttps://\fR and \fBwss://\fR); plain connections are refused.
 .TP
 .BR \-k ", " \-\-key " \fIfile\fR"
 TLS private key in PEM format.
@@ -92,15 +105,17 @@ When running with \fB\-\-daemon\fR, write the daemon's process ID to
 The file given with \fB\-\-config\fR uses \fIkey\fR = \fIvalue\fR lines
 grouped in sections.
 Text after \fB#\fR or \fB;\fR is a comment.
-Boolean values accept \fBtrue\fR or \fB1\fR.
+Boolean values accept \fBtrue\fR/\fBfalse\fR, \fByes\fR/\fBno\fR,
+\fBon\fR/\fBoff\fR or \fB1\fR/\fB0\fR.
+An invalid value is an error.
 .PP
-The configuration file is read \fIafter\fR the command line, so a key
-set in the file overrides the corresponding command\-line option.
+Command\-line options take precedence over values in the file.
 .TP
 .B [general]
 .nf
 daemon     = false
 pid_file   = /var/run/ws2socket.pid
+token_file = /etc/ws2socket/tokens
 .fi
 .TP
 .B [server]
@@ -117,8 +132,7 @@ web_root        = /usr/share/novnc
 .B [proxy]
 .nf
 target          = 127.0.0.1:5900
-buffer_size     = 65536
-max_connections = 1024
+buffer_size     = 1048576
 socket_timeout  = 60
 .fi
 .TP
@@ -130,9 +144,50 @@ console = true
 syslog  = false
 .fi
 .PP
-The values shown for \fBmax_connections\fR, \fBsocket_timeout\fR and
-\fBbuffer_size\fR are the built\-in defaults.
+The numeric values shown are the built\-in defaults:
+.TP
+.B [server] max_connections
+Maximum number of simultaneous clients (0 for no limit).
+Further clients are answered with \fB503 Service Unavailable\fR.
+.TP
+.B [server] socket_timeout
+Seconds a client may take to complete the TLS handshake, send its HTTP
+request, or finish sending a frame, and to accept data.
+0 disables the timeout.
+.TP
+.B [proxy] buffer_size
+Largest WebSocket message, in bytes, accepted from a client (after
+decompression).
+Larger messages close the connection with status 1009.
+.TP
+.B [proxy] socket_timeout
+Seconds allowed for connecting to the target and for the target to
+accept data.
+.PP
 An annotated example is shipped as \fBws2socket.conf.example\fR.
+.SH TOKEN FILE
+With \fB\-\-token\-file\fR (or \fBtoken_file\fR in \fB[general]\fR),
+each client selects its target with a token, using the same format as
+websockify's \fBTokenFile\fR plugin:
+.PP
+.RS
+.nf
+# token: host:port
+desktop1: 192.168.1.10:5900
+desktop2: 192.168.1.11:5900
+.fi
+.RE
+.PP
+The token is taken from the \fBtoken\fR query parameter
+(\fB/websockify?token=desktop1\fR) or, failing that, from the first path
+component (\fB/desktop1\fR).
+Requests with a missing or unknown token are answered with
+\fB403 Forbidden\fR.
+If \fIfile\fR is a directory, every file in it is read.
+Changes are picked up automatically within about a minute.
+.PP
+In noVNC, pass the token through the \fBpath\fR parameter, for example
+\fBvnc.html?path=websockify%3Ftoken%3Ddesktop1\fR.
 .SH PROTOCOL SUPPORT
 .IP \(bu 2
 RFC 6455 handshake, framing (7\-, 16\- and 64\-bit lengths) and
@@ -140,14 +195,21 @@ client\-to\-server unmasking.
 .IP \(bu 2
 Text, binary and fragmented (continuation) messages.
 .IP \(bu 2
-Ping frames are answered with pong; close frames end the session.
+Ping frames are answered with pong; close frames are echoed and end the
+session.
 .IP \(bu 2
-permessage\-deflate compression (RFC 7692) without context takeover.
+permessage\-deflate compression (RFC 7692), negotiated only when the
+client offers it.
+Data sent to the client is not compressed.
 .IP \(bu 2
 HTTP/1.1 static file serving with MIME types for HTML, CSS, JavaScript,
 JSON, PNG, JPEG, GIF, SVG, ICO, WASM and plain text; other files are
 sent as \fBapplication/octet\-stream\fR.
 Paths containing \fB..\fR are rejected.
+.IP \(bu 2
+Error responses: \fB403\fR (bad token or path), \fB404\fR,
+\fB426\fR (no web root), \fB502\fR (target unreachable),
+\fB503\fR (connection limit reached).
 .SH SIGNALS
 .TP
 .BR SIGINT ", " SIGTERM
@@ -183,6 +245,23 @@ ws2socket \-\-config /etc/ws2socket.conf \-\-daemon \e
 .fi
 .RE
 .PP
+Serve \fBwss://\fR and \fBhttps://\fR with a certificate:
+.PP
+.RS
+.nf
+ws2socket \-\-cert /etc/ssl/certs/vnc.pem \-\-key /etc/ssl/private/vnc.key \e
+          \-\-target 127.0.0.1:5900 \-\-web\-root /usr/share/novnc
+.fi
+.RE
+.PP
+Route clients to several VNC servers by token:
+.PP
+.RS
+.nf
+ws2socket \-\-token\-file /etc/ws2socket/tokens \-\-web\-root /usr/share/novnc
+.fi
+.RE
+.PP
 Debug a connection:
 .PP
 .RS
@@ -192,12 +271,15 @@ ws2socket \-t 127.0.0.1:5900 \-v \-\-log\-file /tmp/ws2socket.log
 .RE
 .SH SECURITY
 .B ws2socket
-does not authenticate clients: anyone who can reach the listening port
-can open a connection to the target.
-Bind to \fB127.0.0.1\fR, or restrict access with a firewall, and put a
-reverse proxy such as
+does not authenticate users.
+Without a token file, anyone who can reach the listening port can open a
+connection to the target; with one, anyone who knows a token can.
+Treat tokens as secrets, use TLS so they are not sent in the clear, and
+restrict access with a firewall or a reverse proxy such as
 .BR nginx (8)
-in front of it to provide TLS and authentication.
+that adds authentication.
+Keep the target service's own authentication (for example a VNC
+password) enabled.
 .SH FILES
 .TP
 .I /etc/ws2socket.conf
@@ -208,22 +290,10 @@ It is only read when named with \fB\-\-config\fR.
 Annotated example configuration, in the source distribution.
 .SH BUGS
 .IP \(bu 2
-TLS (\fB\-\-cert\fR/\fB\-\-key\fR) is incomplete: the certificate is
-loaded and the TLS handshake is performed, but application data is still
-read and written unencrypted, so \fBwss://\fR clients cannot connect.
-Terminate TLS in a reverse proxy instead.
+The HTTP server is minimal: no keep\-alive, \fBHEAD\fR or range
+requests, and URL\-encoded file names are not decoded.
 .IP \(bu 2
-The \fBtoken_file\fR key in \fB[general]\fR is parsed but token\-based
-target selection is not yet applied; all clients go to the single
-configured target.
-.IP \(bu 2
-Configuration file values override command\-line options, which is the
-opposite of most programs.
-.IP \(bu 2
-The server advertises permessage\-deflate in its handshake response even
-when the client did not offer it.
-Clients that do not offer compression reject the handshake.
-Web browsers are not affected.
+Metrics are collected internally but not exported.
 .PP
 Report bugs at
 .UR https://github.com/99ecarvalho/ws2socket/issues

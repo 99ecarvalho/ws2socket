@@ -55,13 +55,19 @@ ws2socket uses a **process-per-connection** model: the listener forks one child 
    └─────────────────┘  └─────────────────┘  └─────────────────┘
 ```
 
-- The parent only accepts connections. If TLS is configured, it also runs the
-  TLS handshake. It then forks. A `SIGCHLD` handler reaps finished children.
-- Each child handles exactly one HTTP request or one WebSocket session, then
-  exits.
+- The parent only accepts connections and forks. It counts live children,
+  which a `SIGCHLD` handler decrements as it reaps them. When
+  `[server] max_connections` children are alive, new clients get
+  `503 Service Unavailable` without a fork.
+- Each child sets the `[server] socket_timeout` receive and send timeouts on
+  its socket, performs the TLS handshake if TLS is configured, and then
+  handles exactly one HTTP request or one WebSocket session before exiting. A
+  slow or silent client therefore only ever blocks its own process.
 - Inside a child, `proxy_forward()` runs a `select()` loop over two
-  descriptors: the client socket and the target socket. An idle `select()`
-  timeout (`socket_timeout`) does not close the session.
+  descriptors: the client socket and the target socket. Bytes that OpenSSL
+  has already decrypted are invisible to `select()`, so the loop checks
+  `SSL_pending()` first. An idle `select()` timeout does not close the
+  session.
 
 Consequences:
 
@@ -72,6 +78,8 @@ Consequences:
 - Anything that is meant to span sessions (metrics, connection pooling) would
   need shared memory or IPC, because each child has its own copy. See
   [Known limitations](#known-limitations).
+- Read-only state loaded at startup (configuration, the token table, the TLS
+  context) is simply inherited by each child.
 
 ## Request flow
 
@@ -85,19 +93,33 @@ Consequences:
    - without one, the reply is `426 Upgrade Required`.
 
    The connection is then closed.
-3. For an upgrade, `websocket_accept()` computes
-   `Sec-WebSocket-Accept = base64(SHA1(key + GUID))`, sends `101 Switching
-   Protocols` and sets up permessage-deflate.
-4. `proxy_connect_target()` opens the TCP connection to the configured target,
-   with a timeout.
-5. `proxy_forward()` copies data in both directions until either side closes:
-   - WebSocket to TCP: the frame is read, unmasked, reassembled if fragmented
-     and decompressed if needed, and the payload is written to the target.
-     Ping frames get a pong; a close frame ends the loop.
-   - TCP to WebSocket: whatever is read from the target is sent as one binary
-     frame.
-6. On exit, per-session byte counts, including the compression ratio, are
-   logged.
+3. The target is chosen. With a token file, the token is taken from the
+   request path (`token_auth_extract_from_path()`) and looked up; a missing
+   or unknown token gets `403 Forbidden`. Otherwise the configured target is
+   used.
+4. `proxy_connect_target()` opens the TCP connection to the target, bounded by
+   `[proxy] socket_timeout`. If this fails, the client gets
+   `502 Bad Gateway`. Connecting *before* the handshake means a client never
+   sees a WebSocket that opens and immediately closes.
+5. `websocket_accept()` computes
+   `Sec-WebSocket-Accept = base64(SHA1(key + GUID))` and sends
+   `101 Switching Protocols`. It accepts permessage-deflate only if the client
+   offered it.
+6. `proxy_forward()` copies data in both directions until either side closes:
+   - WebSocket to TCP: `websocket_recv_frame()` reads one frame. It returns a
+     complete message (reassembled and decompressed if needed), or 0 after
+     consuming a control frame or a non-final fragment. The session ends when
+     the WebSocket state leaves `WS_STATE_OPEN`.
+   - TCP to WebSocket: whatever is read from the target (up to 64 KiB) is sent
+     as one binary frame. When the target closes, a close frame (1000) is sent
+     to the client.
+7. On exit, the session duration is logged. With `--verbose`, byte counts and
+   the compression ratio are logged too.
+
+All client I/O goes through `io_send_all()`, `io_recv()` and
+`io_recv_exact()` in `utils.c`. They use `SSL_write()`/`SSL_read()` when the
+connection has a TLS session and `send()`/`recv()` otherwise, so the HTTP,
+handshake and framing code is the same for `ws://` and `wss://`.
 
 ## Source layout
 
@@ -122,26 +144,37 @@ Consequences:
 |---|---|---|
 | Application | `src/ws2socket.c` | `main()`, signal handling, daemonization, per-client handler |
 | Configuration | `include/config.h`, `src/config.c` | Defaults, command-line parsing, INI file loading, validation, `--help` and `--version` |
-| Server | `include/server.h`, `src/server.c` | Listening socket, TLS context, `accept()` and fork loop, HTTP request reading |
+| Server | `include/server.h`, `src/server.c` | Listening socket, TLS context, `accept()` and fork loop, connection limit, per-child TLS handshake, HTTP request reading |
 | HTTP | `src/http_server.c` | Upgrade detection, header lookup, static files, MIME types |
 | WebSocket | `include/websocket.h`, `src/websocket.c`, `src/websocket_impl.c` | RFC 6455 handshake, frame codec, masking, fragmentation, control frames, permessage-deflate |
 | Proxy | `include/proxy.h`, `src/proxy.c` | Target connection, bidirectional `select()` forwarding, statistics |
-| Utilities | `include/utils.h`, `src/utils.c` | Safe strings, `host:port` parsing, Base64, SHA-1, random bytes, socket helpers, circular buffer |
+| Utilities | `include/utils.h`, `src/utils.c` | Safe strings, `host:port` parsing, Base64, SHA-1, random bytes, socket helpers, TLS-aware `io_*` helpers, circular buffer |
 | Logging | `include/logging.h`, `src/logging.c` | Levels, and console, file and syslog targets (mutex-protected) |
-| Token auth | `include/token_auth.h`, `src/token_auth.c` | Token-file parser and hash-table lookup (not wired in yet) |
-| Connection pool | `include/conn_pool.h`, `src/conn_pool.c` | LRU pool of target connections (see limitations) |
+| Token auth | `include/token_auth.h`, `src/token_auth.c` | Token-file parser, hash-table lookup, token extraction from the request path, periodic reload |
+| Connection pool | `include/conn_pool.h`, `src/conn_pool.c` | LRU pool of target connections (inactive, see limitations) |
 | Metrics | `include/metrics.h`, `src/metrics.c` | Counters with Prometheus and JSON export (not wired in yet) |
 | Common | `include/common.h` | Error codes, limits, WebSocket opcodes and states |
 
 ### WebSocket details
 
 - Supports all three payload-length encodings (7-bit, 16-bit and 64-bit).
+  Headers, lengths, masks and payloads are read with `io_recv_exact()`, so
+  frames split across TCP segments or TLS records are handled.
 - Unmasks client frames. Server frames are sent unmasked, as RFC 6455
   requires.
-- Reassembles continuation frames into one message before delivery.
-- permessage-deflate uses raw DEFLATE (`windowBits = -15`) with
-  `server_no_context_takeover` and `client_no_context_takeover`, so no state
-  is kept between messages.
+- Fails the connection with close code 1002 for unmasked client frames, set
+  RSV2/RSV3 bits, RSV1 without negotiated compression, fragmented or
+  oversized control frames, unknown opcodes and out-of-order continuation
+  frames.
+- Reassembles continuation frames into one message before delivery. A
+  message larger than `[proxy] buffer_size` (default 1 MiB) is refused with
+  close code 1009.
+- Answers ping with pong, and echoes the peer's close code.
+- permessage-deflate is negotiated only when the client offers it. It uses raw
+  DEFLATE (`windowBits = -15`) with `server_no_context_takeover` and
+  `client_no_context_takeover`. A compressed message is inflated after
+  reassembly, and output that would exceed `buffer_size` is refused (1009)
+  rather than truncated. Outgoing frames are not compressed.
 - Data from the target is always sent as **binary** frames, which is what
   noVNC and websockify clients expect.
 
@@ -154,34 +187,48 @@ Consequences:
   `svg`, `ico`, `wasm` and `txt`. Everything else is sent as
   `application/octet-stream`.
 - Every response is `Connection: close`, so there is no keep-alive.
+- Status codes: `200`, `403` (traversal attempt or bad token), `404`
+  (missing file or directory), `426` (no web root), `502` (target
+  unreachable), `503` (connection limit).
 
 ### Logging
 
 | Level | Config value | Use |
 |---|---|---|
-| `LOG_DEBUG` | `debug` | Frames, headers, per-read detail (`--verbose`) |
-| `LOG_INFO` | `info` | Connections, configuration summary (the default) |
-| `LOG_WARN` | `warning` | Recoverable oddities, such as a bad config line |
-| `LOG_ERROR` | `error` | Failed operations |
-| `LOG_CRITICAL` | `critical` | Startup failures |
+| `WS_LOG_DEBUG` | `debug` | Frames, headers, per-read detail (`--verbose`) |
+| `WS_LOG_INFO` | `info` | Connections, configuration summary (the default) |
+| `WS_LOG_WARN` | `warning` | Recoverable oddities, rejected clients |
+| `WS_LOG_ERROR` | `error` | Failed operations |
+| `WS_LOG_CRITICAL` | `critical` | Startup failures |
+
+The levels are prefixed with `WS_` because `<syslog.h>` defines its own
+`LOG_DEBUG`, `LOG_INFO` and so on, with different values.
 
 The targets `LOG_TARGET_CONSOLE` (stderr), `LOG_TARGET_FILE` and
 `LOG_TARGET_SYSLOG` can be combined. The syslog facility is `LOG_LOCAL0`.
+Warnings and errors raised before `log_init()`, such as while parsing
+arguments, are written to stderr.
 
 ## Configuration handling
 
 `main()` builds the configuration in this order:
 
-1. `config_init_defaults()`: listen `0.0.0.0:6080`, buffer 64 KiB, up to 1024
-   connections, 60 s socket timeout, log level `info` to the console.
-2. `config_parse_args()`: command-line options.
-3. `config_load_file()`: the INI file, if `--config` was given.
-4. `config_validate()`: requires a non-zero port, a target, and both a
+1. `config_init_defaults()`: listen `0.0.0.0:6080`, 1 MiB maximum message
+   size, up to 1024 connections, 60 s timeouts, log level `info` to the
+   console.
+2. `config_parse_args()`: a first pass over the command line. It rejects
+   invalid options and values, and finds `--config`.
+3. If `--config` was given, the defaults are restored, `config_load_file()`
+   reads the INI file, and `config_parse_args()` runs again. As a result,
+   **command-line options override file values**.
+4. Relative paths (certificate, key, web root, token file, PID file and log
+   file) are made absolute, because `--daemon` changes directory to `/`.
+5. `config_validate()`: requires a target or a token file, and both a
    certificate and a key if either is set.
 
-Because step 3 runs after step 2, **file values override command-line
-values**. This is the reverse of the usual convention and is listed as a
-limitation below.
+Invalid values in the file (a bad port or address, a non-boolean for a
+boolean key, an unknown log level, a negative number) stop startup with a
+`file:line` message.
 
 The recognized sections and keys are:
 
@@ -189,7 +236,7 @@ The recognized sections and keys are:
 |---|---|
 | `[general]` | `daemon`, `pid_file`, `token_file` |
 | `[server]` | `listen`, `port`, `cert_file`, `key_file`, `max_connections`, `socket_timeout`, `web_root` |
-| `[proxy]` | `target`, `buffer_size`, `max_connections`, `socket_timeout` |
+| `[proxy]` | `target`, `buffer_size`, `socket_timeout` (`max_connections` is accepted but has no effect) |
 | `[logging]` | `level`, `file`, `console`, `syslog` |
 
 Unknown keys are ignored silently.
@@ -216,36 +263,25 @@ constructors and I/O:
 
 These are known gaps as of version 0.1.0. They are good first contributions.
 
-1. **Native TLS does not carry data.** `server_init()` creates a TLS 1.2+
-   context and loads the certificate and key, and `server_accept_client()`
-   runs `SSL_accept()`. After that, however, all reads and writes still use
-   the raw socket (`socket_recv`/`socket_send`) instead of
-   `SSL_read`/`SSL_write`, so `wss://` does not work. The TLS handshake also
-   runs in the parent process, where a slow client blocks `accept()`.
-2. **permessage-deflate is always advertised.** `websocket_accept()` detects
-   whether the client offered the extension, but always includes it in the
-   `101` response. Clients that did not offer it must fail the connection
-   (RFC 6455 section 9.1), so tools such as websocat, or Python `websockets`
-   with compression disabled, cannot connect. Browsers are not affected.
-3. **Token routing is not connected.** `token_file` is parsed and
-   `token_auth.c` implements lookup, but `handle_client()` always uses the
-   single configured target.
-4. **Metrics are not exposed.** `metrics.c` can format Prometheus and JSON
+1. **No user authentication.** Tokens choose a target, but anyone who knows a
+   token can use it. Authentication has to be added in front, for example by
+   a reverse proxy.
+2. **Metrics are not exposed.** `metrics.c` can format Prometheus and JSON
    output, but nothing collects metrics or serves an endpoint. With the
    process-per-connection model, counters would also need shared memory.
-5. **The connection pool is inert.** The pool is created, but connections are
-   never returned to it (`conn_pool_put()` is not called), so every session
-   opens a new target connection. That is the correct behavior for stateful
-   protocols like VNC, so the pool should probably stay disabled for them.
-6. **Configuration precedence.** Config-file values override command-line
-   options (see above).
-7. **`max_connections` is not enforced** on the process count.
-8. **HTTP is minimal.** There is no keep-alive, no `HEAD`/`Range` support and
-   no directory listing. Errors are plain status lines.
-9. **No automated tests.** There are no unit, integration or fuzz tests yet.
-10. **Deprecated OpenSSL API.** `SHA1_Init`, `SHA1_Update` and `SHA1_Final`
-    trigger deprecation warnings on OpenSSL 3.x. The `EVP_Digest*` API
-    replaces them.
+3. **The connection pool is inactive.** The pool is created, but connections
+   are never returned to it (`conn_pool_put()` is not called), so every
+   session opens a new target connection. That is the correct behavior for
+   stateful protocols like VNC, so the pool should probably stay unused for
+   them.
+4. **HTTP is minimal.** There is no keep-alive, no `HEAD`/`Range` support, no
+   directory listing and no URL decoding of paths. Errors are short plain-text
+   responses.
+5. **Outgoing frames are not compressed.** VNC data compresses poorly, so
+   this is deliberate. The unfinished `websocket_send_frame_FIXME_compressed()`
+   is where it would go.
+6. **Only the integration tests exist.** There are no unit tests or fuzzing
+   of the HTTP and frame parsers yet.
 
 ## Build system
 
@@ -256,11 +292,33 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build                 # binary, plus docs if Doxygen is found
 cmake --build build --target docs   # API reference only
 sudo cmake --install build          # bin/ws2socket, share/man/man1/ws2socket.1
+ctest --test-dir build              # integration tests (needs python3-websockets)
 ```
 
 The project is compiled with `-Wall -Wextra -Wpedantic -Wstrict-prototypes` and
 links against `OpenSSL::SSL`, `OpenSSL::Crypto`, `ZLIB::ZLIB` and `pthread`.
 When Doxygen is available, the `docs` target is part of `ALL`.
+
+### Tests
+
+[`tests/test_integration.py`](../tests/test_integration.py) runs the built
+binary against local TCP services and talks to it with the Python
+`websockets` client, over plain TCP and TLS. It is registered with CTest when
+`python3` is found. It can also run on its own, optionally filtered by name:
+
+```bash
+python3 tests/test_integration.py build/ws2socket -k tls
+```
+
+The suite runs cleanly under AddressSanitizer and UndefinedBehaviorSanitizer:
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+cmake --build build-asan
+# Leak checking is off: children exit without freeing process-lifetime state
+ASAN_OPTIONS=detect_leaks=0 python3 tests/test_integration.py build-asan/ws2socket
+```
 
 ## Yocto integration
 
@@ -308,14 +366,10 @@ syntax.
 
 In rough priority order:
 
-1. Make native TLS work (`SSL_read`/`SSL_write` throughout, handshake in the
-   child).
-2. Advertise permessage-deflate only when the client offers it.
-3. Make command-line options override the config file.
-4. Wire in token-based target selection (websockify-compatible
-   `?token=` / `path` syntax).
-5. Add a test suite (frame codec, handshake, config parser) and fuzzing of the
-   HTTP and frame parsers.
-6. Move SHA-1 to the EVP API.
-7. Add an optional `/metrics` endpoint.
-8. Consider an `epoll` event loop for very high connection counts.
+1. Fuzz the HTTP request parser and the frame decoder, and add unit tests for
+   them and for the configuration parser.
+2. Add an optional `/metrics` endpoint (needs counters in shared memory).
+3. Optional authentication hooks (for example HTTP Basic or client
+   certificates).
+4. Improve the HTTP server: `HEAD`, URL decoding, caching headers.
+5. Consider an `epoll` event loop for very high connection counts.
