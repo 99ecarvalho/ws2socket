@@ -55,6 +55,16 @@ endif()
 install(TARGETS ws2socket DESTINATION bin)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/docs/ws2socket.1 DESTINATION share/man/man1)
 
+# Integration tests: run with "ctest" (needs Python 3 and the websockets package)
+enable_testing()
+find_program(PYTHON3_EXECUTABLE NAMES python3)
+if(PYTHON3_EXECUTABLE)
+    add_test(NAME integration
+             COMMAND ${PYTHON3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_integration.py
+                     $<TARGET_FILE:ws2socket>)
+endif()
+
 # Doxygen documentation
 find_package(Doxygen)
 if(DOXYGEN_FOUND)
