@@ -80,6 +80,20 @@ See
 .B CONFIGURATION FILE
 below.
 .TP
+.BI \-\-auth\-file " file"
+Require HTTP Basic authentication for every request (static files,
+WebSocket upgrades and \fB/metrics\fR), checking credentials against the
+password file \fIfile\fR.
+See
+.B AUTHENTICATION
+below.
+.TP
+.B \-\-metrics
+Serve Prometheus metrics at \fB/metrics\fR.
+See
+.B METRICS
+below.
+.TP
 .BR \-c ", " \-\-cert " \fIfile\fR"
 TLS certificate in PEM format.
 With \fB\-\-cert\fR and \fB\-\-key\fR, all connections use TLS
@@ -127,6 +141,9 @@ key_file        = /etc/ssl/private/ws2socket.key
 max_connections = 1024
 socket_timeout  = 60
 web_root        = /usr/share/novnc
+auth_file       = /etc/ws2socket/htpasswd
+auth_realm      = ws2socket
+metrics         = false
 .fi
 .TP
 .B [proxy]
@@ -188,6 +205,48 @@ Changes are picked up automatically within about a minute.
 .PP
 In noVNC, pass the token through the \fBpath\fR parameter, for example
 \fBvnc.html?path=websockify%3Ftoken%3Ddesktop1\fR.
+.SH AUTHENTICATION
+With \fB\-\-auth\-file\fR (or \fBauth_file\fR in \fB[server]\fR), every
+request must carry valid HTTP Basic credentials; otherwise the answer is
+\fB401 Unauthorized\fR with a \fBWWW\-Authenticate\fR challenge for the
+realm \fBauth_realm\fR.
+Browsers prompt for the user name and password once and normally reuse
+them for later requests to the same site, including the WebSocket
+connection opened by noVNC.
+.PP
+The file has one \fIuser\fB:\fIhash\fR entry per line, as written by
+.BR htpasswd (1)
+with \fB\-B\fR.
+Hashes are checked with
+.BR crypt (3),
+so bcrypt (\fB$2b$\fR, \fB$2y$\fR), SHA\-256/512\-crypt (\fB$5$\fR,
+\fB$6$\fR) and, where the C library supports it, yescrypt (\fB$y$\fR) can
+be used.
+Plain\-text and DES passwords are refused.
+For example:
+.PP
+.RS
+.nf
+htpasswd \-B \-c /etc/ws2socket/htpasswd alice
+printf 'bob:%s\\n' "$(openssl passwd \-6)" >> /etc/ws2socket/htpasswd
+.fi
+.RE
+.PP
+Failed attempts are delayed by one second.
+The file is re\-read when it changes.
+Keep it readable only by the user ws2socket runs as, and enable TLS, since
+Basic authentication sends the password with every request.
+Authentication and a token file can be combined.
+.SH METRICS
+With \fB\-\-metrics\fR (or \fBmetrics = true\fR in \fB[server]\fR),
+\fBGET /metrics\fR returns counters in the Prometheus text format:
+connections (total and active), rejected clients by reason
+(\fBlimit\fR, \fBauth\fR, \fBtoken\fR, \fBtarget\fR, \fBtls\fR),
+WebSocket sessions (total, active, total duration), bytes and messages
+per direction, HTTP responses by status code, authentication results,
+the start time and the version.
+Counters cover all client processes and reset when ws2socket restarts.
+When authentication is enabled, \fB/metrics\fR requires it too.
 .SH PROTOCOL SUPPORT
 .IP \(bu 2
 RFC 6455 handshake, framing (7\-, 16\- and 64\-bit lengths) and
@@ -202,14 +261,20 @@ permessage\-deflate compression (RFC 7692), negotiated only when the
 client offers it.
 Data sent to the client is not compressed.
 .IP \(bu 2
-HTTP/1.1 static file serving with MIME types for HTML, CSS, JavaScript,
-JSON, PNG, JPEG, GIF, SVG, ICO, WASM and plain text; other files are
+HTTP/1.1 static file serving: \fBGET\fR and \fBHEAD\fR, keep\-alive,
+percent\-decoded paths, \fBindex.html\fR for directories (with a
+redirect when the trailing \fB/\fR is missing),
+\fBLast\-Modified\fR/\fBIf\-Modified\-Since\fR and single byte ranges.
+Common web, image, audio and font types are recognized; other files are
 sent as \fBapplication/octet\-stream\fR.
-Paths containing \fB..\fR are rejected.
+Path segments \fB.\fR and \fB..\fR are rejected, and directories are
+never listed.
 .IP \(bu 2
-Error responses: \fB403\fR (bad token or path), \fB404\fR,
-\fB426\fR (no web root), \fB502\fR (target unreachable),
-\fB503\fR (connection limit reached).
+Error responses: \fB400\fR (malformed request), \fB401\fR
+(authentication), \fB403\fR (bad token or path), \fB404\fR,
+\fB405\fR (method), \fB414\fR/\fB431\fR (request too large),
+\fB416\fR (range), \fB426\fR (no web root), \fB502\fR (target
+unreachable), \fB503\fR (connection limit reached).
 .SH SIGNALS
 .TP
 .BR SIGINT ", " SIGTERM
@@ -270,16 +335,14 @@ ws2socket \-t 127.0.0.1:5900 \-v \-\-log\-file /tmp/ws2socket.log
 .fi
 .RE
 .SH SECURITY
-.B ws2socket
-does not authenticate users.
-Without a token file, anyone who can reach the listening port can open a
-connection to the target; with one, anyone who knows a token can.
-Treat tokens as secrets, use TLS so they are not sent in the clear, and
-restrict access with a firewall or a reverse proxy such as
-.BR nginx (8)
-that adds authentication.
-Keep the target service's own authentication (for example a VNC
-password) enabled.
+Unless \fB\-\-auth\-file\fR is used, anyone who can reach the listening
+port can open a connection to the target (or, with a token file, anyone
+who knows a token).
+Use TLS whenever passwords or tokens cross an untrusted network, restrict
+access with a firewall where possible, and keep the target service's own
+authentication (for example a VNC password) enabled.
+\fB/metrics\fR reveals usage information; protect it with authentication
+or a firewall.
 .SH FILES
 .TP
 .I /etc/ws2socket.conf
@@ -290,10 +353,8 @@ It is only read when named with \fB\-\-config\fR.
 Annotated example configuration, in the source distribution.
 .SH BUGS
 .IP \(bu 2
-The HTTP server is minimal: no keep\-alive, \fBHEAD\fR or range
-requests, and URL\-encoded file names are not decoded.
-.IP \(bu 2
-Metrics are collected internally but not exported.
+The HTTP server serves static files only: no directory listings, no
+compression of responses, no multi\-range requests and no request bodies.
 .PP
 Report bugs at
 .UR https://github.com/99ecarvalho/ws2socket/issues
@@ -310,6 +371,8 @@ This is free software: you are free to change and redistribute it.
 There is NO WARRANTY, to the extent permitted by law.
 .SH SEE ALSO
 .BR websockify (1),
+.BR htpasswd (1),
+.BR crypt (3),
 .BR nginx (8)
 .PP
 Project home page:

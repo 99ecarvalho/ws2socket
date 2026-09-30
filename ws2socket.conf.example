@@ -40,6 +40,14 @@ socket_timeout = 60
 # Directory of static files to serve, e.g. noVNC
 # web_root = /usr/share/novnc
 
+# Require HTTP Basic authentication for every request (use with TLS).
+# File format: user:hash, created with "htpasswd -B" or "openssl passwd -6"
+# auth_file = /etc/ws2socket/htpasswd
+# auth_realm = ws2socket
+
+# Serve Prometheus metrics at /metrics (protected by auth_file when set)
+metrics = false
+
 [proxy]
 # Target TCP server (VNC, SSH, ...). Not needed with token_file.
 target = 127.0.0.1:5900

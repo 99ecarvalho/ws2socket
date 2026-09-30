@@ -10,7 +10,7 @@ For background and the full option list, see the [README](README.md) and
 ## 1. Install build dependencies
 
 ```bash
-sudo apt-get install build-essential cmake libssl-dev zlib1g-dev
+sudo apt-get install build-essential cmake libssl-dev zlib1g-dev libcrypt-dev
 ```
 
 Doxygen is optional. Install it (`sudo apt-get install doxygen`) if you also
@@ -157,6 +157,23 @@ warning about the self-signed certificate. noVNC switches to `wss://`
 automatically. For production, use a certificate from your CA or from
 Let's Encrypt.
 
+## 7. Require a password (optional)
+
+To make the browser ask for a user name and password, create a password file
+and pass it with `--auth-file`:
+
+```bash
+printf 'alice:%s\n' "$(openssl passwd -6)" > htpasswd   # or: htpasswd -B -c htpasswd alice
+chmod 600 htpasswd
+
+./build/ws2socket --cert cert.pem --key key.pem --auth-file htpasswd \
+    --target 127.0.0.1:5900 --web-root ~/noVNC
+```
+
+Basic authentication sends the password with every request, so combine it
+with TLS as shown. Add `--metrics` to expose Prometheus metrics at
+`/metrics`. They are protected by the same password.
+
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
@@ -168,6 +185,7 @@ Let's Encrypt.
 | `404` for `vnc.html` | `--web-root` does not point at the noVNC directory. Check that `<web-root>/vnc.html` exists. |
 | Client gets `502 Bad Gateway` | The target service is not listening. Check it with `ss -ltn` or `nc -vz 127.0.0.1 5900`. |
 | Client gets `403 Forbidden` | A token file is in use and the request has no token, or an unknown one. |
+| Browser keeps asking for a password | The user name or password is wrong, or the hash format is unsupported. The log shows `Authentication failed`, or a warning about the password file at startup. |
 | Client gets `503 Service Unavailable` | `max_connections` clients are already connected. |
 | Browser shows a TLS or "connection reset" error | With `--cert`, only `https://` and `wss://` work, not plain `http://`. |
 

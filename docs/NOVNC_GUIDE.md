@@ -20,6 +20,8 @@ If you have not built ws2socket yet, start with the
 - [noVNC URL parameters](#novnc-url-parameters)
 - [Serving over TLS](#serving-over-tls)
 - [Several VNC servers with tokens](#several-vnc-servers-with-tokens)
+- [Requiring a password](#requiring-a-password)
+- [Monitoring with Prometheus](#monitoring-with-prometheus)
 - [Running as a systemd service](#running-as-a-systemd-service)
 - [Running behind nginx](#running-behind-nginx)
 - [Troubleshooting](#troubleshooting)
@@ -209,6 +211,68 @@ http://vnc.example.com:6080/vnc.html?path=websockify%3Ftoken%3Ddesktop1
   them long and random (for example `openssl rand -hex 16`), and use TLS so
   they are not sent in the clear.
 
+## Requiring a password
+
+`--auth-file` makes ws2socket require HTTP Basic authentication for every
+request: the noVNC page, its WebSocket, and `/metrics`. The browser asks once
+and normally reuses the credentials for the WebSocket connection too.
+
+Create the password file with `htpasswd` (from `apache2-utils`) or with
+`openssl`:
+
+```bash
+htpasswd -B -c /etc/ws2socket/htpasswd alice                    # bcrypt
+printf 'bob:%s\n' "$(openssl passwd -6)" >> /etc/ws2socket/htpasswd  # SHA-512-crypt
+chmod 600 /etc/ws2socket/htpasswd
+```
+
+```bash
+ws2socket --cert /etc/ssl/certs/vnc.pem --key /etc/ssl/private/vnc.key \
+          --auth-file /etc/ws2socket/htpasswd \
+          --target 127.0.0.1:5900 --web-root /opt/novnc
+```
+
+- Always combine it with TLS, because Basic authentication sends the password
+  with every request.
+- Supported hashes are bcrypt (`$2y$`/`$2b$`), SHA-256/512-crypt (`$5$`/`$6$`)
+  and yescrypt (`$y$`). `htpasswd`'s default MD5 format (`$apr1$`) is **not**
+  supported, so pass `-B`.
+- Changes to the file take effect without a restart. Failed logins are delayed
+  by one second and counted in the metrics.
+- The realm shown by the browser can be set with `auth_realm` under
+  `[server]`.
+- Passwords and tokens can be combined: users log in, then the token picks the
+  VNC server.
+
+## Monitoring with Prometheus
+
+`--metrics` (or `metrics = true` under `[server]`) serves counters at
+`/metrics` in the Prometheus text format:
+
+```text
+ws2socket_connections_active 3
+ws2socket_websocket_sessions_active 2
+ws2socket_bytes_total{direction="to_client"} 48213377
+ws2socket_rejected_total{reason="auth"} 4
+ws2socket_http_responses_total{code="200"} 118
+```
+
+A Prometheus scrape job, using the same credentials as the users:
+
+```yaml
+scrape_configs:
+  - job_name: ws2socket
+    scheme: https
+    basic_auth:
+      username: monitor
+      password_file: /etc/prometheus/ws2socket.pass
+    static_configs:
+      - targets: ["vnc.example.com:6080"]
+```
+
+Without `--auth-file`, anyone who can reach the port can read `/metrics`, so
+restrict it with a firewall in that case.
+
 ## Running as a systemd service
 
 systemd handles backgrounding itself, so run ws2socket in the foreground
@@ -236,6 +300,23 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 ```
+
+With `DynamicUser=yes`, the service cannot read files that only root may read,
+such as a TLS private key or a `chmod 600` password file. Hand them over with
+`LoadCredential=`, and refer to them through `%d`, the credentials
+directory:
+
+```ini
+[Service]
+LoadCredential=tls.key:/etc/ssl/private/vnc.example.com.key
+LoadCredential=htpasswd:/etc/ws2socket/htpasswd
+ExecStart=
+ExecStart=/usr/local/bin/ws2socket --config /etc/ws2socket.conf \
+          --key %d/tls.key --auth-file %d/htpasswd
+```
+
+systemd copies credentials when the service starts, so restart the service
+after editing the password file.
 
 A matching `/etc/ws2socket.conf` looks like this:
 
@@ -268,9 +349,10 @@ systemctl status ws2socket
 
 ## Running behind nginx
 
-ws2socket does not authenticate users. To require a login, or to share port
-443 with other sites, bind ws2socket to localhost and let a reverse proxy
-handle TLS and access control:
+ws2socket can handle TLS and passwords itself. A reverse proxy is still
+useful to share port 443 with other sites, or for login methods that
+ws2socket does not provide, such as single sign-on. In that case, bind
+ws2socket to localhost and let the proxy handle TLS and access control:
 
 ```nginx
 server {
@@ -328,6 +410,11 @@ connections.
 **The connection drops after about a minute of inactivity behind a proxy.**
 Raise the proxy's read timeout, for example `proxy_read_timeout` in nginx as
 shown above.
+
+**The browser keeps asking for the password.**
+Check the log for `Authentication failed`, and for startup warnings about the
+password file, such as an unsupported hash (`$apr1$` needs `htpasswd -B`
+instead).
 
 **The client gets `403 Forbidden`.**
 A token file is in use, and the WebSocket URL has no token or an unknown one.

@@ -48,13 +48,17 @@ days, please send a reminder.
 Examples of what we consider vulnerabilities:
 
 - memory-safety bugs (buffer overflows, use-after-free, out-of-bounds reads)
-  in the HTTP, WebSocket frame, compression or configuration parsers;
+  in the HTTP, WebSocket frame, compression, Base64, authentication or
+  configuration parsers;
 - serving files outside `--web-root` (path traversal);
 - crashes or resource exhaustion that one unauthenticated client can trigger
   and that affect other sessions or the listener;
 - ways to make ws2socket connect somewhere other than the configured target,
   or other than the target of the token presented;
-- ways to bypass TLS, `max_connections` or token checks.
+- ways to bypass TLS, `max_connections`, token checks or password
+  authentication, or to learn valid user names or passwords through
+  responses or timing;
+- ways to read `/metrics` without credentials when `--auth-file` is set.
 
 ### Known limitations
 
@@ -63,11 +67,17 @@ vulnerabilities. See
 [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#known-limitations) for
 details.
 
-- ws2socket does **not authenticate users**. Without a token file, anyone who
-  can reach the listening port can reach the target. With one, anyone who
-  knows a valid token can.
+- **Authentication is optional.** Without `--auth-file`, anyone who can reach
+  the listening port can reach the target (or, with a token file, anyone who
+  knows a token).
+- **HTTP Basic authentication** sends the password with every request.
+  Without TLS it travels in the clear, and ws2socket warns about this at
+  startup. There is no logout or session expiry. Any authenticated user may
+  use any token.
 - Tokens are bearer secrets carried in the URL. Browsers may keep them in
   history, and proxies may log them.
+- `/metrics` is disabled by default. When enabled without `--auth-file`, it
+  is readable by anyone who can reach the port.
 
 Reports that show how these limitations can be exploited *beyond* the
 documented behavior are still welcome.
@@ -75,10 +85,13 @@ documented behavior are still welcome.
 ## Deploying ws2socket safely
 
 - Enable TLS (`--cert`/`--key`) on any network you do not fully trust.
-  Otherwise VNC traffic and tokens travel in the clear.
-- Restrict who can reach the port with a firewall, or bind ws2socket to
-  `127.0.0.1` behind a reverse proxy (nginx, Caddy, HAProxy) that adds
-  authentication. An example is in
+  Otherwise VNC traffic, passwords and tokens travel in the clear.
+- Require a password with `--auth-file`, using bcrypt or SHA-512-crypt hashes
+  (`htpasswd -B`, `openssl passwd -6`). Keep the password file readable only
+  by the ws2socket user.
+- Restrict who can reach the port with a firewall where possible. For single
+  sign-on or other login methods, bind ws2socket to `127.0.0.1` behind a
+  reverse proxy. An example is in
   [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx).
 - When using a token file, generate long random tokens
   (`openssl rand -hex 16`), and keep the file readable only by the ws2socket

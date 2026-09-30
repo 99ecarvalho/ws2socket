@@ -50,10 +50,15 @@ shipping a Python runtime is not an option.
   certificate and key.
 - **Token-based routing**: one instance can front many VNC servers, using
   websockify-compatible token files (`?token=...`).
+- **Optional authentication**: HTTP Basic auth against an htpasswd file
+  (bcrypt, SHA-crypt or yescrypt hashes), for pages, WebSockets and metrics.
+- **Prometheus metrics** at `/metrics`, covering connections, sessions,
+  traffic, HTTP status codes and rejections.
 - **permessage-deflate** (RFC 7692) compression, negotiated when the client
   offers it.
-- **Built-in static file server** with the MIME types noVNC needs, and
-  path-traversal protection.
+- **Built-in HTTP/1.1 static file server**: keep-alive, `HEAD`, conditional
+  requests, byte ranges, percent-decoded paths with traversal protection, and
+  the MIME types noVNC needs.
 - **Process-per-connection model**: a misbehaving client cannot take down
   other sessions. The number of simultaneous clients is capped by
   `max_connections`.
@@ -72,12 +77,14 @@ interfaces may still change before 1.0.
 
 Known limitations:
 
-- **No user authentication.** Tokens select a target, but anyone who knows a
-  token can use it. For untrusted networks, add authentication in a reverse
-  proxy. See [SECURITY.md](SECURITY.md).
-- **Minimal HTTP server.** There is no keep-alive, `HEAD` or range request
-  support, and no URL decoding of file names. It is enough for noVNC.
-- **Metrics** are collected internally but not yet exported.
+- **Static files only.** The HTTP server has no directory listings, response
+  compression, multi-range requests or request bodies. That is enough for
+  noVNC.
+- **Basic authentication only.** There are no sessions, logout, or client
+  certificates. Use TLS with it, since the password is sent with every
+  request.
+- **Process per connection.** This is simple and robust, but less efficient
+  than an event loop at thousands of simultaneous connections.
 
 See [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md#known-limitations) for
 details.
@@ -86,7 +93,7 @@ details.
 
 ```bash
 # Dependencies (Debian/Ubuntu)
-sudo apt-get install build-essential cmake libssl-dev zlib1g-dev
+sudo apt-get install build-essential cmake libssl-dev zlib1g-dev libcrypt-dev
 
 # Get the source and build
 git clone https://github.com/99ecarvalho/ws2socket.git
@@ -111,7 +118,12 @@ For a step-by-step walkthrough, including serving noVNC, see
 | CMake | 3.10 or newer | `cmake` |
 | OpenSSL | 1.1.1 or newer (3.x recommended) | `libssl-dev` |
 | zlib | any | `zlib1g-dev` |
+| libcrypt (optional, for `--auth-file`) | libxcrypt or glibc | `libcrypt-dev` |
 | Doxygen (optional, for API docs) | any | `doxygen` |
+
+CMake reports `HTTP authentication: enabled` when it finds libcrypt. Without
+it, ws2socket builds normally, and `--auth-file` reports that the build has
+no password support.
 
 ws2socket targets Linux. Other POSIX systems may work but are untested.
 
@@ -173,6 +185,8 @@ ws2socket [OPTIONS]
   -p, --port PORT           Listen port (default: 6080)
   -t, --target HOST:PORT    Target TCP server
       --token-file FILE     Choose the target per client from a token file
+      --auth-file FILE      Require HTTP Basic authentication (htpasswd file)
+      --metrics             Serve Prometheus metrics at /metrics
   -w, --web-root DIR        Serve static files from DIR (e.g. noVNC)
   -f, --config FILE         Read settings from an INI file
   -c, --cert FILE           TLS certificate (PEM), enables https:// and wss://
@@ -209,6 +223,15 @@ desktop2: 192.168.1.11:5900
 TOKENS
 ws2socket --token-file /etc/ws2socket/tokens --web-root /usr/share/novnc
 # then open http://<host>:6080/vnc.html?path=websockify%3Ftoken%3Ddesktop1
+```
+
+Require a password, and expose metrics to an authenticated Prometheus:
+
+```bash
+htpasswd -B -c /etc/ws2socket/htpasswd alice    # or: openssl passwd -6
+ws2socket --cert cert.pem --key key.pem --auth-file /etc/ws2socket/htpasswd \
+          --metrics --target 127.0.0.1:5900 --web-root /usr/share/novnc
+curl -u alice https://<host>:6080/metrics
 ```
 
 Run as a daemon with a config file:
@@ -259,12 +282,14 @@ the man page (`man ws2socket`).
 
 ## Deployment notes
 
-- **Use TLS and restrict access for anything public.** ws2socket can
-  terminate TLS itself (`--cert`/`--key`), but it does no user
-  authentication. On untrusted networks, put a reverse proxy (nginx, Caddy,
-  HAProxy) in front for authentication, or limit access with a firewall. An
-  nginx example is in
+- **Use TLS and authentication for anything public.** ws2socket can terminate
+  TLS itself (`--cert`/`--key`) and require a password (`--auth-file`). Also
+  restrict access with a firewall where possible. If you need single sign-on
+  or other login methods, put a reverse proxy in front instead; an nginx
+  example is in
   [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md#running-behind-nginx).
+- **Monitoring**: `--metrics` exposes `/metrics` for Prometheus. Protect it
+  with `--auth-file` or a firewall.
 - **Under systemd, run in the foreground** (no `--daemon`) with `Type=simple`.
   A sample unit file is in the noVNC guide.
 - **Yocto**: the project builds with `inherit cmake`. A sample recipe is in

@@ -83,29 +83,39 @@ Consequences:
 
 ## Request flow
 
-`handle_client()` in `src/ws2socket.c` runs in the child:
+`handle_client()` in `src/ws2socket.c` runs in the child. It loops over the
+HTTP requests of a keep-alive connection until the client closes it, the
+5-second idle timeout expires, 100 requests have been served, or a WebSocket
+upgrade takes the connection over:
 
-1. `server_recv_request()` reads and parses the HTTP request (method, path,
-   up to 32 headers).
-2. If the request is **not** a WebSocket upgrade
-   (`http_is_websocket_upgrade()`):
-   - with a web root, `http_serve_file()` sends the file or an error status;
-   - without one, the reply is `426 Upgrade Required`.
-
-   The connection is then closed.
-3. The target is chosen. With a token file, the token is taken from the
+1. `server_recv_request()` reads and parses one request (request line and up
+   to 32 headers). Bytes that arrive after the headers are kept for the next
+   request, so pipelined requests work. Malformed or oversized requests get
+   `400`, `414` or `431`, followed by a lingering close: the server stops
+   writing and drains the client's input briefly, so the error response is not
+   lost to a TCP reset.
+2. With `--auth-file`, `check_auth()` verifies the `Authorization` header
+   (`auth_check()` in `auth.c`). Missing or wrong credentials get
+   `401 Unauthorized` with a `WWW-Authenticate` challenge, and the loop goes on
+   with the next request if the connection is kept alive.
+3. A WebSocket upgrade (`http_is_websocket_upgrade()`) is passed to
+   `handle_websocket()`, which runs steps 4 to 8.
+   Otherwise, `/metrics` (with `--metrics`) is answered from the shared
+   counters, a web root is served by `http_serve_file()`, and without a web
+   root the reply is `426 Upgrade Required`.
+4. The target is chosen. With a token file, the token is taken from the
    request path (`token_auth_extract_from_path()`) and looked up; a missing
    or unknown token gets `403 Forbidden`. Otherwise the configured target is
    used.
-4. `proxy_connect_target()` opens the TCP connection to the target, bounded by
+5. `proxy_connect_target()` opens the TCP connection to the target, bounded by
    `[proxy] socket_timeout`. If this fails, the client gets
    `502 Bad Gateway`. Connecting *before* the handshake means a client never
    sees a WebSocket that opens and immediately closes.
-5. `websocket_accept()` computes
+6. `websocket_accept()` computes
    `Sec-WebSocket-Accept = base64(SHA1(key + GUID))` and sends
    `101 Switching Protocols`. It accepts permessage-deflate only if the client
    offered it.
-6. `proxy_forward()` copies data in both directions until either side closes:
+7. `proxy_forward()` copies data in both directions until either side closes:
    - WebSocket to TCP: `websocket_recv_frame()` reads one frame. It returns a
      complete message (reassembled and decompressed if needed), or 0 after
      consuming a control frame or a non-final fragment. The session ends when
@@ -113,7 +123,7 @@ Consequences:
    - TCP to WebSocket: whatever is read from the target (up to 64 KiB) is sent
      as one binary frame. When the target closes, a close frame (1000) is sent
      to the client.
-7. On exit, the session duration is logged. With `--verbose`, byte counts and
+8. On exit, the session duration is logged. With `--verbose`, byte counts and
    the compression ratio are logged too.
 
 All client I/O goes through `io_send_all()`, `io_recv()` and
@@ -151,8 +161,9 @@ handshake and framing code is the same for `ws://` and `wss://`.
 | Utilities | `include/utils.h`, `src/utils.c` | Safe strings, `host:port` parsing, Base64, SHA-1, random bytes, socket helpers, TLS-aware `io_*` helpers, circular buffer |
 | Logging | `include/logging.h`, `src/logging.c` | Levels, and console, file and syslog targets (mutex-protected) |
 | Token auth | `include/token_auth.h`, `src/token_auth.c` | Token-file parser, hash-table lookup, token extraction from the request path, periodic reload |
+| Authentication | `include/auth.h`, `src/auth.c` | htpasswd-style password file, HTTP Basic parsing, `crypt_r()` verification, reload on change |
 | Connection pool | `include/conn_pool.h`, `src/conn_pool.c` | LRU pool of target connections (inactive, see limitations) |
-| Metrics | `include/metrics.h`, `src/metrics.c` | Counters with Prometheus and JSON export (not wired in yet) |
+| Metrics | `include/metrics.h`, `src/metrics.c` | Counters in shared memory, updated atomically from every process; Prometheus text export |
 | Common | `include/common.h` | Error codes, limits, WebSocket opcodes and states |
 
 ### WebSocket details
@@ -180,16 +191,54 @@ handshake and framing code is the same for `ws://` and `wss://`.
 
 ### HTTP details
 
-- Requests are read until the end of the headers. Only `GET` is meaningful.
-- The request path is joined to the web root. A trailing `/` maps to
-  `index.html`. Any path containing `..` is rejected.
-- MIME types: `html`/`htm`, `css`, `js`, `json`, `png`, `jpg`/`jpeg`, `gif`,
-  `svg`, `ico`, `wasm` and `txt`. Everything else is sent as
+- HTTP/1.1 with keep-alive (the default for 1.1, opt-in for 1.0). A request
+  that announces a body (`Content-Length` or `Transfer-Encoding`) is answered
+  and the connection is then closed, because bodies are never read.
+- `GET` and `HEAD` are served; other methods get `405` with `Allow`.
+- The path is percent-decoded (`http_decode_path()`), and the query string and
+  fragment are dropped. Malformed escapes and `%00` get `400`, and `.` or `..`
+  segments get `403`. The path is then joined to the web root.
+- A directory without a trailing `/` is redirected (`301`); with one,
+  `index.html` is served. Directories are never listed.
+- Responses carry `Date`, `Server`, `Last-Modified`, `Cache-Control: no-cache`
+  (browsers revalidate, so noVNC upgrades show up at once), `Accept-Ranges`
+  and `X-Content-Type-Options: nosniff`.
+- `If-Modified-Since` gets `304`. A single `bytes=` range gets `206`, or
+  `416` when unsatisfiable. Multiple ranges, other units and requests with
+  `If-Range` get the whole file.
+- MIME types cover HTML, CSS, JavaScript (`js`, `mjs`), JSON, source maps,
+  web manifests, XML, text, PNG, JPEG, GIF, SVG, ICO, WebP, WASM, MP3, Ogg,
+  WAV and web fonts, with `charset=utf-8` for text types. Everything else is
   `application/octet-stream`.
-- Every response is `Connection: close`, so there is no keep-alive.
-- Status codes: `200`, `403` (traversal attempt or bad token), `404`
-  (missing file or directory), `426` (no web root), `502` (target
-  unreachable), `503` (connection limit).
+- Status codes: `101`, `200`, `206`, `301`, `304`, `400`, `401`, `403`, `404`,
+  `405`, `414`, `416`, `426`, `431`, `502`, `503`.
+
+### Authentication details
+
+- The password file has `user:hash` lines. Only hashes starting with `$`
+  (modern `crypt(3)` schemes) are accepted; plaintext and DES entries are
+  skipped with a warning.
+- `auth_check()` decodes the Basic credentials with a strict Base64 decoder,
+  and verifies the password with `crypt_r()` and a constant-time comparison.
+  Unknown users are hashed against a real entry too, so timing does not reveal
+  which names exist. A failed attempt sleeps for one second in its own
+  process.
+- The last accepted `Authorization` value is cached per connection, so a
+  keep-alive connection pays for the (deliberately slow) bcrypt hash once.
+- The file is re-read when its modification time changes.
+- libcrypt is optional at build time (`WS2SOCKET_HAVE_CRYPT`).
+
+### Metrics details
+
+- `metrics_init()` maps an anonymous `MAP_SHARED` region before the first
+  `fork()`, so every child process updates the same counters.
+- Updates are relaxed `__atomic` operations, and are async-signal-safe: the
+  `SIGCHLD` handler decrements `connections_active`. Counters are 64-bit where
+  the CPU has lock-free 64-bit atomics, and word-sized otherwise, because a
+  lock-based fallback would be neither signal-safe nor shared between
+  processes.
+- The session gauge is decremented by the child when its session ends. A child
+  killed mid-session therefore leaves the gauge one too high until restart.
 
 ### Logging
 
@@ -235,7 +284,7 @@ The recognized sections and keys are:
 | Section | Keys |
 |---|---|
 | `[general]` | `daemon`, `pid_file`, `token_file` |
-| `[server]` | `listen`, `port`, `cert_file`, `key_file`, `max_connections`, `socket_timeout`, `web_root` |
+| `[server]` | `listen`, `port`, `cert_file`, `key_file`, `max_connections`, `socket_timeout`, `web_root`, `auth_file`, `auth_realm`, `metrics` |
 | `[proxy]` | `target`, `buffer_size`, `socket_timeout` (`max_connections` is accepted but has no effect) |
 | `[logging]` | `level`, `file`, `console`, `syslog` |
 
@@ -263,25 +312,20 @@ constructors and I/O:
 
 These are known gaps as of version 0.1.0. They are good first contributions.
 
-1. **No user authentication.** Tokens choose a target, but anyone who knows a
-   token can use it. Authentication has to be added in front, for example by
-   a reverse proxy.
-2. **Metrics are not exposed.** `metrics.c` can format Prometheus and JSON
-   output, but nothing collects metrics or serves an endpoint. With the
-   process-per-connection model, counters would also need shared memory.
+1. **Static files only.** The HTTP server has no directory listings, response
+   compression, multi-range responses or request bodies.
+2. **Basic authentication only.** There are no sessions, logout, per-user
+   targets or client certificates. Any authenticated user may use any token.
 3. **The connection pool is inactive.** The pool is created, but connections
    are never returned to it (`conn_pool_put()` is not called), so every
    session opens a new target connection. That is the correct behavior for
    stateful protocols like VNC, so the pool should probably stay unused for
    them.
-4. **HTTP is minimal.** There is no keep-alive, no `HEAD`/`Range` support, no
-   directory listing and no URL decoding of paths. Errors are short plain-text
-   responses.
-5. **Outgoing frames are not compressed.** VNC data compresses poorly, so
+4. **Outgoing frames are not compressed.** VNC data compresses poorly, so
    this is deliberate. The unfinished `websocket_send_frame_FIXME_compressed()`
    is where it would go.
-6. **Only the integration tests exist.** There are no unit tests or fuzzing
-   of the HTTP and frame parsers yet.
+5. **No unit tests or fuzzing harness in the tree.** The integration tests
+   cover behavior end to end, but the parsers deserve dedicated fuzz targets.
 
 ## Build system
 
@@ -336,7 +380,7 @@ SRC_URI = "git://github.com/99ecarvalho/ws2socket.git;protocol=https;branch=main
 SRCREV = "<commit or tag to build>"
 S = "${WORKDIR}/git"
 
-DEPENDS = "openssl zlib"
+DEPENDS = "openssl zlib virtual/crypt"
 
 inherit cmake
 
@@ -366,10 +410,9 @@ syntax.
 
 In rough priority order:
 
-1. Fuzz the HTTP request parser and the frame decoder, and add unit tests for
-   them and for the configuration parser.
-2. Add an optional `/metrics` endpoint (needs counters in shared memory).
-3. Optional authentication hooks (for example HTTP Basic or client
-   certificates).
-4. Improve the HTTP server: `HEAD`, URL decoding, caching headers.
-5. Consider an `epoll` event loop for very high connection counts.
+1. Add libFuzzer targets for the HTTP request parser, the frame decoder, the
+   Base64 decoder and the configuration parser, plus unit tests for them.
+2. Client-certificate (mutual TLS) authentication, and per-user token
+   restrictions.
+3. Compress static files on the fly or serve pre-compressed `.gz` files.
+4. Consider an `epoll` event loop for very high connection counts.

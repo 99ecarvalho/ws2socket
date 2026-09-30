@@ -50,7 +50,7 @@ You need a C11 compiler, CMake 3.10 or newer, and the OpenSSL and zlib
 development headers:
 
 ```bash
-sudo apt-get install build-essential cmake libssl-dev zlib1g-dev doxygen
+sudo apt-get install build-essential cmake libssl-dev zlib1g-dev libcrypt-dev doxygen
 git clone https://github.com/99ecarvalho/ws2socket.git
 cd ws2socket
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug

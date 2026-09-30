@@ -89,6 +89,23 @@ docker run --rm -p 6080:6080 \
 
 Clients then connect with `https://` and `wss://`.
 
+### Requiring a password and exposing metrics
+
+Mount the password file (readable by UID 999) and enable the options you
+need:
+
+```bash
+docker run --rm -p 6080:6080 \
+    -v /etc/ws2socket/tls:/tls:ro \
+    -v /etc/ws2socket/htpasswd:/etc/ws2socket/htpasswd:ro \
+    ws2socket --target vnc-host:5900 \
+              --cert /tls/fullchain.pem --key /tls/privkey.pem \
+              --auth-file /etc/ws2socket/htpasswd --metrics
+```
+
+The image is built with libcrypt, so bcrypt, SHA-crypt and yescrypt hashes
+all work.
+
 ### Using a configuration file
 
 An annotated example is included at `/etc/ws2socket/ws2socket.conf.example`.
