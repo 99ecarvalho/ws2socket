@@ -1,6 +1,12 @@
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
 # ws2socket Configuration File Example
 # This is an INI-style configuration file
 # Lines starting with # or ; are comments
+#
+# Load it with: ws2socket --config /path/to/ws2socket.conf
+# Note: values in this file override command-line options.
 
 [general]
 # Run as daemon in background
@@ -9,7 +15,7 @@ daemon = false
 # PID file path (when running as daemon)
 pid_file = /var/run/ws2socket.pid
 
-# Token file for authentication (optional)
+# Token file (parsed, but token-based routing is not implemented yet)
 # token_file = /etc/ws2socket/tokens.txt
 
 [server]

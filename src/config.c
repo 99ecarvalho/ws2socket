@@ -3,7 +3,12 @@
  * @brief Configuration Parsing
  * @author Eduardo Correia <ecorreia@apliant.com.br>
  * 
- * License: LGPL v3
+ * @copyright Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+ *
+ * This file is part of ws2socket. It is free software, licensed under the
+ * GNU Lesser General Public License v3.0 or later. See COPYING for details.
+ *
+ * SPDX-License-Identifier: LGPL-3.0-or-later
  */
 
 #include "config.h"
@@ -415,5 +420,8 @@ void config_print_version(void)
 {
     printf("ws2socket version 0.1.0\n");
     printf("WebSocket to TCP Socket Proxy\n");
-    printf("License: LGPL v3\n");
+    printf("Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>\n");
+    printf("License: LGPL-3.0-or-later <https://www.gnu.org/licenses/lgpl-3.0.html>\n");
+    printf("This is free software: you are free to change and redistribute it.\n");
+    printf("There is NO WARRANTY, to the extent permitted by law.\n");
 }

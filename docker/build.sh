@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
 # Ensure the script is run from the top-level directory
 cd "$(dirname "$0")/.."
 

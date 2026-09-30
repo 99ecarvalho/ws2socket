@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
 # Dockerfile for building the ws2socket project
 
 # Use an official lightweight Python image as a base

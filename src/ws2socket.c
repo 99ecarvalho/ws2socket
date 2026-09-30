@@ -6,7 +6,12 @@
  * Entry point for the ws2socket application.
  * Handles server initialization, client connections, and shutdown.
  * 
- * License: LGPL v3
+ * @copyright Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+ *
+ * This file is part of ws2socket. It is free software, licensed under the
+ * GNU Lesser General Public License v3.0 or later. See COPYING for details.
+ *
+ * SPDX-License-Identifier: LGPL-3.0-or-later
  */
 
 #include "common.h"
