@@ -550,7 +550,355 @@ def test_version_and_help(binary):
     out = subprocess.run([binary, "--version"], capture_output=True, text=True)
     assert out.returncode == 0 and "Copyright" in out.stdout
     out = subprocess.run([binary, "--help"], capture_output=True, text=True)
-    assert out.returncode == 0 and "--token-file" in out.stdout
+    assert out.returncode == 0
+    for option in ("--token-file", "--auth-file", "--metrics"):
+        assert option in out.stdout, option
+
+
+# -----------------------------------------------------------------------------
+# Metrics
+# -----------------------------------------------------------------------------
+
+def fetch(port, path, method="GET", headers=None, conn=None, tls=None):
+    """Send one HTTP request; return (status, headers dict, body, connection)."""
+    import http.client
+    if conn is None:
+        if tls:
+            conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=10,
+                                               context=tls)
+        else:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request(method, path, headers=headers or {})
+    resp = conn.getresponse()
+    body = resp.read()
+    return resp.status, {k.lower(): v for k, v in resp.getheaders()}, body, conn
+
+
+def parse_metrics(text):
+    values = {}
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            name, value = line.rsplit(" ", 1)
+            values[name] = float(value)
+    return values
+
+
+def test_metrics_disabled_by_default(binary):
+    echo = TcpServer(echo_handler)
+    with tempfile.TemporaryDirectory() as root:
+        with Proxy(binary, ["--target", f"127.0.0.1:{echo.port}",
+                            "--web-root", root]) as p:
+            status, _, _, _ = fetch(p.port, "/metrics")
+            assert status == 404, status
+
+
+def test_metrics_endpoint(binary):
+    echo = TcpServer(echo_handler)
+    with tempfile.NamedTemporaryFile("w", suffix=".tokens") as tokens:
+        tokens.write(f"good: 127.0.0.1:{echo.port}\n")
+        tokens.flush()
+        with Proxy(binary, ["--token-file", tokens.name, "--metrics"]) as p:
+            base = f"ws://127.0.0.1:{p.port}/websockify"
+            assert run(echo_roundtrip(base + "?token=good", b"12345")) == b"12345"
+            try:
+                run(echo_roundtrip(base + "?token=bad"))
+            except REJECTED:
+                pass
+            time.sleep(0.3)  # let the session's process record its end
+
+            status, headers, body, _ = fetch(p.port, "/metrics")
+            assert status == 200
+            assert headers["content-type"].startswith("text/plain; version=0.0.4")
+            m = parse_metrics(body.decode())
+            assert m["ws2socket_websocket_sessions_total"] == 1, m
+            assert m["ws2socket_websocket_sessions_active"] == 0, m
+            assert m['ws2socket_bytes_total{direction="to_target"}'] == 5
+            assert m['ws2socket_bytes_total{direction="to_client"}'] == 5
+            assert m['ws2socket_rejected_total{reason="token"}'] == 1
+            assert m['ws2socket_http_responses_total{code="101"}'] == 1
+            assert m['ws2socket_http_responses_total{code="403"}'] == 1
+            # This /metrics request's own connection is active and counted
+            assert m["ws2socket_connections_active"] >= 1
+            assert m["ws2socket_connections_total"] >= 3
+            assert 'ws2socket_build_info{version="' in body.decode()
+
+            status, _, _, _ = fetch(p.port, "/metrics", method="POST")
+            assert status == 405
+
+
+# -----------------------------------------------------------------------------
+# Authentication
+# -----------------------------------------------------------------------------
+
+def make_htpasswd(directory, users):
+    path = os.path.join(directory, "htpasswd")
+    with open(path, "w") as f:
+        for user, (scheme, password) in users.items():
+            if scheme == "bcrypt":
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    import crypt
+                hashed = crypt.crypt(password, crypt.mksalt(crypt.METHOD_BLOWFISH))
+            else:
+                hashed = subprocess.run(["openssl", "passwd", scheme, password],
+                                        capture_output=True, text=True,
+                                        check=True).stdout.strip()
+            f.write(f"{user}:{hashed}\n")
+    os.chmod(path, 0o600)
+    return path
+
+
+def basic(user, password):
+    import base64
+    return {"Authorization": "Basic " +
+            base64.b64encode(f"{user}:{password}".encode()).decode()}
+
+
+def test_basic_auth_http(binary):
+    if not shutil.which("openssl"):
+        raise SkipTest("openssl command not found")
+    echo = TcpServer(echo_handler)
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "index.html"), "w") as f:
+            f.write("private")
+        users = {"alice": ("-6", "wonderland"), "bob": ("-5", "builder")}
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                import crypt  # noqa: F401
+            users["carol"] = ("bcrypt", "s3cret")
+        except ImportError:
+            pass
+        htpasswd = make_htpasswd(root, users)
+        with Proxy(binary, ["--target", f"127.0.0.1:{echo.port}",
+                            "--web-root", root, "--auth-file", htpasswd,
+                            "--metrics"]) as p:
+            status, headers, _, _ = fetch(p.port, "/")
+            assert status == 401
+            assert headers["www-authenticate"] == 'Basic realm="ws2socket", charset="UTF-8"'
+
+            started = time.time()
+            status, _, _, _ = fetch(p.port, "/", headers=basic("alice", "wrong"))
+            assert status == 401 and time.time() - started >= 0.9
+
+            for user, (_, password) in users.items():
+                status, _, body, _ = fetch(p.port, "/", headers=basic(user, password))
+                assert (status, body) == (200, b"private"), user
+
+            status, _, _, _ = fetch(p.port, "/", headers=basic("mallory", "x"))
+            assert status == 401
+            status, _, _, _ = fetch(p.port, "/", headers={"Authorization": "Basic %%%"})
+            assert status == 401
+
+            # /metrics is protected too
+            status, _, _, _ = fetch(p.port, "/metrics")
+            assert status == 401
+            status, _, body, _ = fetch(p.port, "/metrics", headers=basic("alice", "wonderland"))
+            assert status == 200
+            m = parse_metrics(body.decode())
+            assert m['ws2socket_auth_total{result="failure"}'] == 3, m
+
+
+def test_basic_auth_websocket(binary):
+    if not shutil.which("openssl"):
+        raise SkipTest("openssl command not found")
+    echo = TcpServer(echo_handler)
+    with tempfile.TemporaryDirectory() as tmp:
+        htpasswd = make_htpasswd(tmp, {"alice": ("-6", "wonderland")})
+        cert, key = make_cert(tmp)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with Proxy(binary, ["--target", f"127.0.0.1:{echo.port}",
+                            "--auth-file", htpasswd,
+                            "--cert", cert, "--key", key]) as p:
+            url = f"wss://alice:wonderland@127.0.0.1:{p.port}/websockify"
+            assert run(echo_roundtrip(url, ssl=ctx)) == b"hello"
+            for bad in (f"wss://127.0.0.1:{p.port}/websockify",
+                        f"wss://alice:nope@127.0.0.1:{p.port}/websockify"):
+                try:
+                    run(echo_roundtrip(bad, ssl=ctx))
+                    raise AssertionError(f"{bad} was accepted")
+                except REJECTED as e:
+                    assert rejected_status(e) == 401
+
+
+def test_auth_file_reload(binary):
+    if not shutil.which("openssl"):
+        raise SkipTest("openssl command not found")
+    with tempfile.TemporaryDirectory() as root:
+        with open(os.path.join(root, "index.html"), "w") as f:
+            f.write("ok")
+        htpasswd = make_htpasswd(root, {"alice": ("-6", "one")})
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root,
+                            "--auth-file", htpasswd]) as p:
+            assert fetch(p.port, "/", headers=basic("alice", "one"))[0] == 200
+            time.sleep(1.1)  # make sure the modification time changes
+            make_htpasswd(root, {"alice": ("-6", "two")})
+            assert fetch(p.port, "/", headers=basic("alice", "one"))[0] == 401
+            assert fetch(p.port, "/", headers=basic("alice", "two"))[0] == 200
+
+
+# -----------------------------------------------------------------------------
+# HTTP server
+# -----------------------------------------------------------------------------
+
+def web_root_fixture(root):
+    files = {
+        "index.html": b"<h1>index</h1>",
+        "app.mjs": b"export {};",
+        "bell.mp3": b"ID3",
+        "a b.txt": b"spaces",
+        "file..txt": b"dots",
+        "digits.txt": b"0123456789",
+        "sub/index.html": b"sub index",
+    }
+    for name, data in files.items():
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+
+
+def test_http_keep_alive(binary):
+    with tempfile.TemporaryDirectory() as root:
+        web_root_fixture(root)
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root,
+                            "--metrics"]) as p:
+            status, headers, body, conn = fetch(p.port, "/metrics")
+            assert status == 200 and headers["connection"] == "keep-alive"
+            before = parse_metrics(body.decode())["ws2socket_connections_total"]
+            sock = conn.sock
+            for path in ("/index.html", "/digits.txt", "/app.mjs", "/metrics"):
+                status, _, body, conn = fetch(p.port, path, conn=conn)
+                assert status == 200 and conn.sock is sock, path
+            after = parse_metrics(body.decode())["ws2socket_connections_total"]
+            assert after == before, (before, after)  # no new connections
+
+            # Connection: close is honoured
+            status, headers, _, conn = fetch(p.port, "/", conn=conn,
+                                             headers={"Connection": "close"})
+            assert headers["connection"] == "close"
+
+
+def test_http_methods_and_head(binary):
+    with tempfile.TemporaryDirectory() as root:
+        web_root_fixture(root)
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root]) as p:
+            status, headers, body, _ = fetch(p.port, "/digits.txt", method="HEAD")
+            assert (status, body, headers["content-length"]) == (200, b"", "10")
+            status, headers, _, _ = fetch(p.port, "/digits.txt", method="POST")
+            assert status == 405 and headers["allow"] == "GET, HEAD"
+
+
+def test_http_paths(binary):
+    with tempfile.TemporaryDirectory() as root:
+        web_root_fixture(root)
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root]) as p:
+            assert fetch(p.port, "/a%20b.txt")[2] == b"spaces"
+            assert fetch(p.port, "/file..txt")[2] == b"dots"
+            assert fetch(p.port, "/digits.txt?cache=1")[2] == b"0123456789"
+            for bad in ("/%2e%2e/%2e%2e/etc/passwd", "/..%2f..%2fetc/passwd",
+                        "/sub/../index.html", "/./index.html"):
+                assert fetch(p.port, bad)[0] == 403, bad
+            assert fetch(p.port, "/bad%zzescape")[0] == 400
+            assert fetch(p.port, "/nul%00byte")[0] == 400
+            status, headers, _, _ = fetch(p.port, "/sub?x=1")
+            assert status == 301 and headers["location"] == "/sub/?x=1"
+            assert fetch(p.port, "/sub/")[2] == b"sub index"
+            assert fetch(p.port, "/missing")[0] == 404
+
+
+def test_http_headers_and_mime(binary):
+    with tempfile.TemporaryDirectory() as root:
+        web_root_fixture(root)
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root]) as p:
+            _, headers, _, _ = fetch(p.port, "/index.html")
+            assert headers["content-type"] == "text/html; charset=utf-8"
+            assert headers["x-content-type-options"] == "nosniff"
+            assert headers["accept-ranges"] == "bytes"
+            assert headers["server"].startswith("ws2socket/")
+            assert "date" in headers and "last-modified" in headers
+            assert fetch(p.port, "/app.mjs")[1]["content-type"].startswith("text/javascript")
+            assert fetch(p.port, "/bell.mp3")[1]["content-type"] == "audio/mpeg"
+
+
+def test_http_conditional_and_range(binary):
+    with tempfile.TemporaryDirectory() as root:
+        web_root_fixture(root)
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root]) as p:
+            _, headers, _, _ = fetch(p.port, "/digits.txt")
+            lm = headers["last-modified"]
+            status, _, body, _ = fetch(p.port, "/digits.txt",
+                                       headers={"If-Modified-Since": lm})
+            assert (status, body) == (304, b"")
+            status, _, _, _ = fetch(p.port, "/digits.txt", headers={
+                "If-Modified-Since": "Mon, 01 Jan 1990 00:00:00 GMT"})
+            assert status == 200
+
+            cases = {"bytes=2-4": (206, b"234", "bytes 2-4/10"),
+                     "bytes=7-": (206, b"789", "bytes 7-9/10"),
+                     "bytes=-3": (206, b"789", "bytes 7-9/10"),
+                     "bytes=5-100": (206, b"56789", "bytes 5-9/10")}
+            for value, (code, data, content_range) in cases.items():
+                status, headers, body, _ = fetch(p.port, "/digits.txt",
+                                                 headers={"Range": value})
+                assert (status, body, headers["content-range"]) == \
+                    (code, data, content_range), value
+            status, headers, _, _ = fetch(p.port, "/digits.txt",
+                                          headers={"Range": "bytes=50-"})
+            assert status == 416 and headers["content-range"] == "bytes */10"
+            # Unsupported forms fall back to the whole file
+            for value in ("bytes=0-1,4-5", "items=0-1", "bytes=x-y"):
+                status, _, body, _ = fetch(p.port, "/digits.txt",
+                                           headers={"Range": value})
+                assert (status, body) == (200, b"0123456789"), value
+
+
+def raw_http(port, data):
+    with socket.create_connection(("127.0.0.1", port), 5) as sock:
+        sock.sendall(data)
+        response = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return response
+            response += chunk
+
+
+def test_http_bad_requests(binary):
+    with tempfile.TemporaryDirectory() as root:
+        web_root_fixture(root)
+        with Proxy(binary, ["--target", "127.0.0.1:1", "--web-root", root]) as p:
+            assert raw_http(p.port, b"garbage\r\n\r\n").startswith(b"HTTP/1.1 400")
+            assert raw_http(p.port, b"GET relative HTTP/1.1\r\n\r\n").startswith(b"HTTP/1.1 400")
+            assert raw_http(p.port, b"GET / SPDY/3\r\n\r\n").startswith(b"HTTP/1.1 400")
+            long_uri = b"GET /" + b"a" * 5000 + b" HTTP/1.1\r\n\r\n"
+            assert raw_http(p.port, long_uri).startswith(b"HTTP/1.1 414")
+            huge = b"GET / HTTP/1.1\r\nX-Big: " + b"b" * 20000 + b"\r\n\r\n"
+            assert raw_http(p.port, huge).startswith(b"HTTP/1.1 431")
+            # HTTP/1.0 without keep-alive closes after one response
+            reply = raw_http(p.port, b"GET /digits.txt HTTP/1.0\r\n\r\n")
+            assert reply.startswith(b"HTTP/1.1 200") and reply.endswith(b"0123456789")
+            # Two pipelined requests are both answered
+            reply = raw_http(p.port, b"GET /digits.txt HTTP/1.1\r\nHost: x\r\n\r\n"
+                                     b"GET /file..txt HTTP/1.1\r\nHost: x\r\n"
+                                     b"Connection: close\r\n\r\n")
+            assert reply.count(b"HTTP/1.1 200") == 2 and reply.endswith(b"dots")
+
+
+def test_lowercase_upgrade_header(binary):
+    echo = TcpServer(echo_handler)
+    with Proxy(binary, ["--target", f"127.0.0.1:{echo.port}"]) as p:
+        sock = socket.create_connection(("127.0.0.1", p.port), 5)
+        sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nupgrade: WebSocket\r\n"
+                     b"connection: keep-alive, upgrade\r\n"
+                     b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                     b"Sec-WebSocket-Version: 13\r\n\r\n")
+        assert sock.recv(4096).startswith(b"HTTP/1.1 101")
+        sock.close()
 
 
 # -----------------------------------------------------------------------------
