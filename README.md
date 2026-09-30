@@ -1,6 +1,6 @@
 # ws2socket
 
-[![License: LGPL v3+](https://img.shields.io/badge/license-LGPL--3.0--or--later-blue.svg)](COPYING)
+[![License: LGPL v3+](https://img.shields.io/badge/license-LGPL--3.0--or--later-blue.svg)](COPYING.LESSER)
 ![Language: C11](https://img.shields.io/badge/language-C11-555.svg)
 ![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
@@ -264,7 +264,8 @@ Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
 
 ws2socket is free software: you can redistribute it and/or modify it under the
 terms of the **GNU Lesser General Public License, version 3 or (at your option)
-any later version**. See [COPYING](COPYING) for the full text.
+any later version**. The license text is in [COPYING.LESSER](COPYING.LESSER);
+it supplements the GNU General Public License v3, included as [COPYING](COPYING).
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS

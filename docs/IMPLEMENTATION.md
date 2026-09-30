@@ -271,7 +271,8 @@ ws2socket builds with the standard `cmake` class. A minimal recipe
 SUMMARY = "WebSocket to TCP socket proxy"
 DESCRIPTION = "Lightweight C replacement for websockify, suitable for noVNC"
 LICENSE = "LGPL-3.0-or-later"
-LIC_FILES_CHKSUM = "file://COPYING;md5=<run md5sum COPYING>"
+LIC_FILES_CHKSUM = "file://COPYING.LESSER;md5=3000208d539ec061b899bce1d9ce9404 \
+                    file://COPYING;md5=1ebbd3e34237af26da5dc08a4e440464"
 
 SRC_URI = "git://<repository-url>;protocol=https;branch=main"
 SRCREV = "<commit>"
@@ -288,8 +289,9 @@ FILES:${PN} += "${mandir}/man1/ws2socket.1"
 ```
 
 `cmake_do_install` already installs the binary and the man page, so no custom
-`do_install` is needed. Fill in the checksum with `md5sum COPYING`. The recipe
-has been written for Scarthgap (5.0) syntax.
+`do_install` is needed. If the license files change, update the checksums
+with `md5sum COPYING COPYING.LESSER`. The recipe uses Scarthgap (5.0)
+syntax.
 
 ## Coding conventions
 
