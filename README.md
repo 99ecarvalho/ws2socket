@@ -38,6 +38,7 @@ shipping a Python runtime is not an option.
 - [Deployment notes](#deployment-notes)
 - [Documentation](#documentation)
 - [Contributing](#contributing)
+- [Security](#security)
 - [License](#license)
 
 ## Features
@@ -239,35 +240,24 @@ The full list of keys is in the man page (`man ws2socket`).
 | [QUICKSTART.md](QUICKSTART.md) | Build, run and connect in a few minutes |
 | [docs/NOVNC_GUIDE.md](docs/NOVNC_GUIDE.md) | Serving noVNC, systemd, nginx/TLS, troubleshooting |
 | [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Architecture, source layout, limitations, Yocto recipe |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to report bugs and submit changes |
+| [SECURITY.md](SECURITY.md) | Reporting vulnerabilities, safe deployment |
 | [docs/ws2socket.1](docs/ws2socket.1) | Man page (`man ./docs/ws2socket.1`) |
 | `docs/html/` | Doxygen API reference (generated at build time) |
 
 ## Contributing
 
-Contributions are welcome, whether bug reports, documentation fixes or code.
+Contributions are welcome, from bug reports and documentation fixes to code.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup,
+coding style and commit conventions. The gaps listed under
+[Project status](#project-status), along with a test suite, are the most useful
+places to start.
 
-1. Open an [issue](https://github.com/99ecarvalho/ws2socket/issues) describing the bug or feature before
-   starting larger changes.
-2. Keep the existing style: C11, K&R with 4-space indentation, and a Doxygen
-   comment on every public function.
-3. Make sure the build is warning-free with the project flags
-   (`-Wall -Wextra -Wpedantic -Wstrict-prototypes`).
-4. Add the standard copyright and SPDX header to new source files:
+## Security
 
-   ```c
-   /**
-    * @file example.c
-    * @brief One-line description
-    * @author Your Name <you@example.com>
-    *
-    * @copyright Copyright (c) 2026 Your Name <you@example.com>
-    *
-    * SPDX-License-Identifier: LGPL-3.0-or-later
-    */
-   ```
-
-The gaps listed under [Project status](#project-status), along with a test
-suite, are the most useful places to start.
+Please report vulnerabilities privately, as described in
+[SECURITY.md](SECURITY.md), and not in public issues. The same file explains
+how to deploy ws2socket safely given its current limitations.
 
 ## License
 
