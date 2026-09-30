@@ -61,6 +61,12 @@ typedef struct {
     char config_file[512];
     /** Web root directory for static files (e.g., noVNC) */
     char web_root[512];
+    /** Password file for HTTP Basic authentication (empty: disabled) */
+    char auth_file[512];
+    /** Realm reported in WWW-Authenticate */
+    char auth_realm[128];
+    /** Serve Prometheus metrics at /metrics */
+    int metrics_enabled;
 } app_config_t;
 
 /**

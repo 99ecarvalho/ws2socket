@@ -23,6 +23,8 @@
 #include "websocket.h"
 #include "utils.h"
 #include "token_auth.h"
+#include "auth.h"
+#include "metrics.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -42,6 +44,9 @@ static app_config_t g_config;
 /** Token-to-target map (NULL unless a token file is configured) */
 static token_auth_t *g_token_auth = NULL;
 
+/** Password database (NULL unless authentication is enabled) */
+static auth_t *g_auth = NULL;
+
 /**
  * @brief Signal handler for graceful shutdown
  * 
@@ -59,55 +64,22 @@ static void signal_handler(int sig)
 }
 
 /**
- * @brief Handle client WebSocket connection
- * 
- * @param server Server instance
- * @param client_fd Client socket file descriptor
+ * @brief Handle a WebSocket upgrade request: pick the target, connect,
+ *        complete the handshake and proxy until either side closes
+ *
+ * @param client_fd Client socket
+ * @param ssl TLS session (if any)
+ * @param req The upgrade request
  * @param addr Client address
- * @param ssl SSL connection (if any)
+ * @param client_id Identifier used in log messages
  * @return Status code
  */
-static int handle_client(ws_server_t *server, int client_fd,
-                        const struct sockaddr_storage *addr, SSL *ssl)
+static int handle_websocket(int client_fd, SSL *ssl, http_request_t *req,
+                            const struct sockaddr_storage *addr, uint32_t client_id)
 {
     websocket_t *ws = NULL;
     proxy_client_t *proxy_client = NULL;
-    http_request_t request;
-    char client_addr_str[INET_ADDRSTRLEN + 6];
     int ret;
-
-    if (!server || client_fd < 0) {
-        return WS_EINVAL;
-    }
-
-    /* Format client address for logging */
-    socket_addr_to_string(addr, sizeof(struct sockaddr_storage),
-                         client_addr_str, sizeof(client_addr_str));
-
-    /* Generate unique client ID using PID and timestamp for forked processes */
-    static uint32_t process_counter = 0;
-    uint32_t client_id = ((uint32_t)getpid() << 16) | (__sync_fetch_and_add(&process_counter, 1) & 0xFFFF);
-
-    log_info("[Client %u] New connection from %s", client_id, client_addr_str);
-
-    /* Receive HTTP request */
-    ret = server_recv_request(client_fd, ssl, &request);
-    if (ret != WS_SUCCESS) {
-        log_error("[Client %u] Failed to receive HTTP request", client_id);
-        return ret;
-    }
-
-    /* Check if this is a WebSocket upgrade request */
-    if (!http_is_websocket_upgrade(&request)) {
-        /* Serve static file if web_root is set */
-        if (strlen(server->web_root) > 0) {
-            log_info("[Client %u] Serving file: %s", client_id, request.path);
-            http_serve_file(client_fd, ssl, server->web_root, request.path);
-        } else {
-            http_send_status(client_fd, ssl, 426, "Upgrade Required");
-        }
-        return WS_SUCCESS;
-    }
 
     /* Choose the target: from the token file, or the configured default */
     char target_host[256];
@@ -117,9 +89,10 @@ static int handle_client(ws_server_t *server, int client_fd,
         char token[256];
         token_target_t token_target;
 
-        if (token_auth_extract_from_path(request.path, token, sizeof(token)) != WS_SUCCESS ||
+        if (token_auth_extract_from_path(req->path, token, sizeof(token)) != WS_SUCCESS ||
             token_auth_lookup(g_token_auth, token, &token_target) != WS_SUCCESS) {
             log_warn("[Client %u] Rejected: missing or unknown token", client_id);
+            metrics_rejected(METRIC_REJECT_TOKEN);
             http_send_status(client_fd, ssl, 403, "Forbidden");
             return WS_EAUTH;
         }
@@ -148,10 +121,10 @@ static int handle_client(ws_server_t *server, int client_fd,
     /* Build headers array for websocket_accept */
     const char *headers[MAX_HTTP_HEADERS];
     static char header_lines[MAX_HTTP_HEADERS][640];
-    for (int i = 0; i < request.num_headers && i < MAX_HTTP_HEADERS; i++) {
+    for (int i = 0; i < req->num_headers && i < MAX_HTTP_HEADERS; i++) {
         /* Safely format header line with explicit null termination */
         int written = snprintf(header_lines[i], sizeof(header_lines[i]), "%s: %s",
-                              request.headers[i].name, request.headers[i].value);
+                              req->headers[i].name, req->headers[i].value);
         if (written >= (int)sizeof(header_lines[i])) {
             /* Truncation occurred - ensure null termination */
             header_lines[i][sizeof(header_lines[i]) - 1] = '\0';
@@ -173,13 +146,14 @@ static int handle_client(ws_server_t *server, int client_fd,
     ret = proxy_connect_target(proxy_client, target_host, target_port, 0);
     if (ret != WS_SUCCESS) {
         log_error("[Client %u] Failed to connect to target %s:%u", client_id, target_host, target_port);
+        metrics_rejected(METRIC_REJECT_TARGET);
         http_send_status(client_fd, ssl, 502, "Bad Gateway");
         websocket_destroy(ws);
         proxy_client_destroy(proxy_client);
         return ret;
     }
 
-    ret = websocket_accept(ws, headers, request.num_headers);
+    ret = websocket_accept(ws, headers, req->num_headers);
     if (ret != WS_SUCCESS) {
         log_error("[Client %u] Failed to accept WebSocket: %d", client_id, ret);
         http_send_status(client_fd, ssl, 400, "Bad Request");
@@ -198,13 +172,198 @@ static int handle_client(ws_server_t *server, int client_fd,
     log_info("[Client %u] WebSocket connection established, proxying to %s:%u", 
              client_id, target_host, target_port);
 
+    metrics_http_response(101);
+    metrics_ws_session_started();
+    time_t session_start = time(NULL);
+
     /* Start bidirectional proxy */
     proxy_forward(proxy_client);
+
+    metrics_ws_session_ended((uint64_t)(time(NULL) - session_start));
 
     /* Cleanup */
     proxy_client_destroy(proxy_client);
 
     return WS_SUCCESS;
+}
+
+/**
+ * @brief Close gracefully after an error response
+ *
+ * If the client is still sending (for example an oversized request),
+ * closing at once makes the kernel send a TCP reset, which can destroy the
+ * response before the client reads it. Stop writing and drain what the
+ * client sends for a moment first.
+ */
+static void lingering_close(int client_fd, SSL *ssl)
+{
+    uint8_t discard[4096];
+    size_t drained = 0;
+
+    socket_set_timeout(client_fd, 1);
+    if (!ssl) {
+        shutdown(client_fd, SHUT_WR);
+    }
+    while (drained < 256 * 1024) {
+        ssize_t n = io_recv(client_fd, ssl, discard, sizeof(discard));
+        if (n <= 0) {
+            break;
+        }
+        drained += (size_t)n;
+    }
+}
+
+/**
+ * @brief Check the request's credentials when authentication is enabled
+ *
+ * Sends 401 when they are missing or wrong.
+ *
+ * @return 1 if the request may proceed, 0 if it was answered with 401
+ */
+static int check_auth(int client_fd, SSL *ssl, const http_request_t *req,
+                      uint32_t client_id)
+{
+    char user[256];
+    char challenge[256];
+
+    if (!g_auth) {
+        return 1;
+    }
+
+    auth_result_t result = auth_check(g_auth, http_get_header_value(req, "Authorization"),
+                                      user, sizeof(user));
+    if (result == AUTH_OK) {
+        metrics_auth(1);
+        log_debug("[Client %u] Authenticated as '%s'", client_id, user);
+        return 1;
+    }
+
+    metrics_rejected(METRIC_REJECT_AUTH);
+    if (result == AUTH_INVALID) {
+        metrics_auth(0);
+        log_warn("[Client %u] Authentication failed", client_id);
+        sleep(1);  /* Slow down password guessing */
+    }
+
+    snprintf(challenge, sizeof(challenge),
+             "WWW-Authenticate: Basic realm=\"%s\", charset=\"UTF-8\"\r\n",
+             auth_realm(g_auth));
+    http_respond(client_fd, ssl, req, 401, challenge, "text/plain; charset=utf-8",
+                 "Unauthorized\n", 13);
+    return 0;
+}
+
+/**
+ * @brief Answer GET /metrics with the Prometheus text format
+ */
+static void serve_metrics(int client_fd, SSL *ssl, const http_request_t *req)
+{
+    static char body[16384];
+
+    if (strcmp(req->method, "GET") != 0 && strcmp(req->method, "HEAD") != 0) {
+        http_respond(client_fd, ssl, req, 405, "Allow: GET, HEAD\r\n",
+                     "text/plain; charset=utf-8", "Method Not Allowed\n", 19);
+        return;
+    }
+
+    ssize_t len = metrics_export_prometheus(body, sizeof(body));
+    if (len < 0) {
+        http_respond(client_fd, ssl, req, 500, NULL, "text/plain; charset=utf-8",
+                     "Internal Server Error\n", 22);
+        return;
+    }
+    http_respond(client_fd, ssl, req, 200, "Cache-Control: no-store\r\n",
+                 "text/plain; version=0.0.4; charset=utf-8", body, (size_t)len);
+}
+
+/**
+ * @brief Handle a client connection
+ *
+ * Serves HTTP requests (static files, /metrics) until the client closes a
+ * keep-alive connection, or hands the connection over to the WebSocket proxy
+ * when an upgrade request arrives.
+ *
+ * @param server Server instance
+ * @param client_fd Client socket file descriptor
+ * @param addr Client address
+ * @param ssl SSL connection (if any)
+ * @return Status code
+ */
+static int handle_client(ws_server_t *server, int client_fd,
+                        const struct sockaddr_storage *addr, SSL *ssl)
+{
+    /* Large; one per process */
+    static http_request_t request;
+    char client_addr_str[INET6_ADDRSTRLEN + 8];
+    int ret;
+
+    if (!server || client_fd < 0) {
+        return WS_EINVAL;
+    }
+
+    /* Format client address for logging */
+    socket_addr_to_string(addr, sizeof(struct sockaddr_storage),
+                         client_addr_str, sizeof(client_addr_str));
+
+    /* Generate unique client ID using PID and timestamp for forked processes */
+    static uint32_t process_counter = 0;
+    uint32_t client_id = ((uint32_t)getpid() << 16) | (__sync_fetch_and_add(&process_counter, 1) & 0xFFFF);
+
+    log_info("[Client %u] New connection from %s", client_id, client_addr_str);
+
+    for (int served = 0; ; served++) {
+        /* Between requests, wait only briefly for the next one */
+        if (served > 0) {
+            socket_set_timeout(client_fd, HTTP_KEEPALIVE_TIMEOUT);
+        }
+
+        ret = server_recv_request(client_fd, ssl, &request);
+        if (ret != WS_SUCCESS) {
+            if (request.error_status) {
+                http_send_status(client_fd, ssl, request.error_status,
+                                 http_status_reason(request.error_status));
+                lingering_close(client_fd, ssl);
+            }
+            return served > 0 ? WS_SUCCESS : ret;
+        }
+
+        if (served > 0 && g_config.server.socket_timeout > 0) {
+            socket_set_timeout(client_fd, g_config.server.socket_timeout);
+        }
+        if (served + 1 >= HTTP_KEEPALIVE_MAX_REQUESTS) {
+            request.keep_alive = 0;
+        }
+
+        if (!check_auth(client_fd, ssl, &request, client_id)) {
+            if (!request.keep_alive) {
+                return WS_EAUTH;
+            }
+            continue;
+        }
+
+        /* WebSocket upgrade: the connection belongs to the proxy from now on */
+        if (http_is_websocket_upgrade(&request)) {
+            return handle_websocket(client_fd, ssl, &request, addr, client_id);
+        }
+
+        char path[1024];
+        if (g_config.metrics_enabled &&
+            http_decode_path(request.path, path, sizeof(path)) == 0 &&
+            strcmp(path, "/metrics") == 0) {
+            serve_metrics(client_fd, ssl, &request);
+        } else if (strlen(server->web_root) > 0) {
+            if (http_serve_file(client_fd, ssl, server->web_root, &request) < 0) {
+                return WS_ESOCKET;
+            }
+        } else {
+            http_send_status(client_fd, ssl, 426, "Upgrade Required");
+            return WS_SUCCESS;
+        }
+
+        if (!request.keep_alive) {
+            return WS_SUCCESS;
+        }
+    }
 }
 
 /**
@@ -362,6 +521,7 @@ int main(int argc, char *argv[])
         make_absolute(g_config.server.key_file, sizeof(g_config.server.key_file)) < 0 ||
         make_absolute(g_config.web_root, sizeof(g_config.web_root)) < 0 ||
         make_absolute(g_config.token_file, sizeof(g_config.token_file)) < 0 ||
+        make_absolute(g_config.auth_file, sizeof(g_config.auth_file)) < 0 ||
         make_absolute(g_config.pid_file, sizeof(g_config.pid_file)) < 0 ||
         make_absolute(g_config.logging.logfile, sizeof(g_config.logging.logfile)) < 0) {
         fprintf(stderr, "Invalid path in configuration\n");
@@ -387,7 +547,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    log_info("Starting ws2socket v0.1.0");
+    log_info("Starting ws2socket v%s", WS2SOCKET_VERSION);
     config_print(&g_config);
 
     /* Daemonize if requested */
@@ -408,6 +568,29 @@ int main(int argc, char *argv[])
             log_shutdown();
             return EXIT_FAILURE;
         }
+    }
+
+    /* Load the password file, if authentication is enabled */
+    if (g_config.auth_file[0]) {
+        g_auth = auth_create(g_config.auth_file, g_config.auth_realm);
+        if (!g_auth) {
+            log_critical("Failed to initialize authentication from %s", g_config.auth_file);
+            log_shutdown();
+            return EXIT_FAILURE;
+        }
+        if (!g_config.server.use_ssl) {
+            log_warn("Authentication without TLS: passwords are sent in the clear");
+        }
+    }
+
+    /* Shared counters must exist before the first fork */
+    if (metrics_init() != WS_SUCCESS) {
+        log_critical("Failed to initialize metrics");
+        log_shutdown();
+        return EXIT_FAILURE;
+    }
+    if (g_config.metrics_enabled && !g_auth) {
+        log_warn("/metrics is enabled without authentication");
     }
 
     /* Initialize proxy */

@@ -61,13 +61,19 @@ typedef struct {
 /** Maximum number of HTTP headers */
 #define MAX_HTTP_HEADERS 32
 
+/** Seconds to wait for the next request on a keep-alive connection */
+#define HTTP_KEEPALIVE_TIMEOUT 5
+
+/** Requests served on one connection before it is closed */
+#define HTTP_KEEPALIVE_MAX_REQUESTS 100
+
 /**
  * @struct http_header
  * @brief HTTP header name-value pair
  */
 typedef struct {
     char name[128];
-    char value[512];
+    char value[1024];
 } http_header_t;
 
 /**
@@ -79,8 +85,8 @@ typedef struct {
 typedef struct {
     /** HTTP method (GET, POST, HEAD, etc) */
     char method[16];
-    /** Request path */
-    char path[512];
+    /** Request target as sent (path and optional query string) */
+    char path[2048];
     /** HTTP version ("HTTP/1.0" or "HTTP/1.1") */
     char version[16];
     /** Headers */
@@ -91,6 +97,11 @@ typedef struct {
     uint8_t *body;
     /** Body length */
     size_t body_len;
+    /** Connection should stay open after the response (HTTP keep-alive) */
+    int keep_alive;
+    /** Status to answer with when the request could not be read or parsed
+     *  (400, 414 or 431), or 0 */
+    int error_status;
 } http_request_t;
 
 /**
@@ -256,26 +267,70 @@ int http_is_websocket_upgrade(const http_request_t *req);
 const char *http_get_header_value(const http_request_t *request, const char *name);
 
 /**
- * @brief Send a bare HTTP status response and nothing else
+ * @brief Send a short plain-text status response with "Connection: close"
  *
  * @param client_fd Client socket
  * @param ssl TLS session, or NULL for a plain connection
  * @param code HTTP status code
- * @param reason Reason phrase (also used as the plain-text body)
+ * @param reason Text used as the plain-text body
  * @return WS_SUCCESS on success, WS_ESOCKET on send failure
  */
 int http_send_status(int client_fd, SSL *ssl, int code, const char *reason);
 
 /**
+ * @brief Send a complete HTTP response
+ *
+ * Adds Date, Server, Content-Length and Connection headers. Honours
+ * keep-alive and omits the body for HEAD requests.
+ *
+ * @param client_fd Client socket
+ * @param ssl TLS session, or NULL for a plain connection
+ * @param req Request being answered (NULL: close the connection)
+ * @param code HTTP status code
+ * @param extra_headers Additional header lines, each ending in CRLF, or NULL
+ * @param content_type Content-Type value, or NULL for none
+ * @param body Response body, or NULL
+ * @param body_len Body length
+ * @return WS_SUCCESS on success, error code otherwise
+ */
+int http_respond(int client_fd, SSL *ssl, const http_request_t *req, int code,
+                 const char *extra_headers, const char *content_type,
+                 const void *body, size_t body_len);
+
+/**
+ * @brief Reason phrase for an HTTP status code
+ */
+const char *http_status_reason(int code);
+
+/**
+ * @brief MIME type for a file name, from its extension
+ */
+const char *http_get_mime_type(const char *path);
+
+/**
+ * @brief Percent-decode the path part of a request target
+ *
+ * @param target Request target (the query string and fragment are dropped)
+ * @param out Decoded path
+ * @param out_size Size of out
+ * @return 0 on success, -1 for malformed escapes, encoded NUL or overflow
+ */
+int http_decode_path(const char *target, char *out, size_t out_size);
+
+/**
  * @brief Serve a static file from the web root
+ *
+ * Handles GET and HEAD (other methods get 405), percent-decoding, directory
+ * redirects and index.html, If-Modified-Since and single byte ranges.
  *
  * @param client_fd Client socket
  * @param ssl TLS session, or NULL for a plain connection
  * @param web_root Directory to serve files from
- * @param uri_path Request path (query string is ignored)
- * @return 0 when the file was sent, -1 otherwise (an error status is sent)
+ * @param req Parsed request
+ * @return HTTP status sent, or -1 if the connection failed mid-response
  */
-int http_serve_file(int client_fd, SSL *ssl, const char *web_root, const char *uri_path);
+int http_serve_file(int client_fd, SSL *ssl, const char *web_root,
+                    const http_request_t *req);
 
 /**
  * @brief Main server loop

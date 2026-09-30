@@ -2,9 +2,13 @@
  * @file metrics.h
  * @brief Metrics Collection and Export
  * @author Eduardo Correia <ecorreia@apliant.com.br>
- * 
- * Collects and exports metrics in Prometheus format.
- * 
+ *
+ * Collects process-wide counters and exports them in the Prometheus text
+ * format. ws2socket handles each client in its own process, so the counters
+ * live in an anonymous shared memory mapping created before the first fork
+ * and are updated with lock-free atomic operations. The update functions are
+ * async-signal-safe and do nothing until metrics_init() has been called.
+ *
  * @copyright Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
  *
  * This file is part of ws2socket. It is free software, licensed under the
@@ -20,196 +24,145 @@
 #include "common.h"
 
 /**
+ * @brief Counter type
+ *
+ * 64-bit where the CPU supports lock-free 64-bit atomics, otherwise the
+ * native word size. Lock-free operations are required because counters are
+ * shared between processes and updated from a signal handler.
+ */
+#if defined(__GCC_ATOMIC_LLONG_LOCK_FREE) && __GCC_ATOMIC_LLONG_LOCK_FREE == 2
+typedef uint64_t metric_counter_t;
+#else
+typedef unsigned long metric_counter_t;
+#endif
+
+/**
+ * @brief Reasons a client was turned away
+ */
+typedef enum {
+    METRIC_REJECT_LIMIT = 0,   /**< max_connections reached (503) */
+    METRIC_REJECT_AUTH,        /**< missing or wrong credentials (401) */
+    METRIC_REJECT_TOKEN,       /**< missing or unknown token (403) */
+    METRIC_REJECT_TARGET,      /**< target unreachable (502) */
+    METRIC_REJECT_TLS,         /**< TLS handshake failed */
+    METRIC_REJECT_COUNT
+} metrics_reject_t;
+
+/** Number of distinct HTTP status codes tracked individually */
+#define METRICS_HTTP_CODES 17
+
+/**
  * @struct metrics
- * @brief Metrics collector
- * 
- * This structure holds various counters and metrics for the application.
+ * @brief Shared metrics counters
  */
 typedef struct {
-    /** Total number of connections handled. */
-    uint64_t total_connections;
-    /** Number of currently active connections. */
-    uint64_t active_connections;
-    /** Number of failed connection attempts. */
-    uint64_t failed_connections;
-    /** Total number of WebSocket upgrades performed. */
-    uint64_t total_websocket_upgrades;
+    /** Accepted TCP connections */
+    metric_counter_t connections_total;
+    /** Connections currently being handled (live child processes) */
+    metric_counter_t connections_active;
+    /** Clients turned away, by reason */
+    metric_counter_t rejected[METRIC_REJECT_COUNT];
 
-    /** Total bytes sent by the application. */
-    uint64_t bytes_sent;
-    /** Total bytes received by the application. */
-    uint64_t bytes_received;
-    /** Total WebSocket frames sent. */
-    uint64_t frames_sent;
-    /** Total WebSocket frames received. */
-    uint64_t frames_received;
+    /** WebSocket sessions established */
+    metric_counter_t ws_sessions_total;
+    /** WebSocket sessions currently open */
+    metric_counter_t ws_sessions_active;
+    /** Sum of the durations of finished sessions, in seconds */
+    metric_counter_t ws_session_seconds;
 
-    /** Total HTTP requests handled. */
-    uint64_t http_requests;
-    /** Number of HTTP 200 responses sent. */
-    uint64_t http_200;
-    /** Number of HTTP 404 responses sent. */
-    uint64_t http_404;
-    /** Number of HTTP 500 responses sent. */
-    uint64_t http_500;
+    /** Payload bytes forwarded from clients to targets */
+    metric_counter_t bytes_to_target;
+    /** Payload bytes forwarded from targets to clients */
+    metric_counter_t bytes_to_client;
+    /** WebSocket messages received from clients */
+    metric_counter_t messages_from_client;
+    /** WebSocket messages sent to clients */
+    metric_counter_t messages_to_client;
 
-    /** Number of successful authentication attempts. */
-    uint64_t auth_success;
-    /** Number of failed authentication attempts. */
-    uint64_t auth_failure;
+    /** HTTP responses by status code (see metrics.c for the code list) */
+    metric_counter_t http_responses[METRICS_HTTP_CODES];
+    /** HTTP responses with any other status code */
+    metric_counter_t http_responses_other;
 
-    /** Number of connection pool hits. */
-    uint64_t pool_hits;
-    /** Number of connection pool misses. */
-    uint64_t pool_misses;
+    /** Successful HTTP authentications */
+    metric_counter_t auth_success;
+    /** Failed HTTP authentications (wrong user or password) */
+    metric_counter_t auth_failure;
 
-    /** Total time spent in WebSocket handshakes (microseconds). */
-    uint64_t handshake_time_total;
-    /** Total number of WebSocket handshakes performed. */
-    uint64_t handshake_count;
-
-    /** Server start time. */
+    /** Process start time (Unix time) */
     time_t start_time;
-    /** Server uptime in seconds. */
-    uint32_t uptime_seconds;
-
-    /** Mutex for thread-safe access to metrics. */
-    pthread_mutex_t lock;
 } metrics_t;
 
 /**
- * @brief Initialize metrics
- * 
- * @return Pointer to metrics_t or NULL on error
+ * @brief Create the shared metrics area
+ *
+ * Must be called in the parent before any fork(). Calling it again is a
+ * no-op.
+ *
+ * @return WS_SUCCESS, or WS_ENOMEM if the mapping could not be created
  */
-metrics_t *metrics_init(void);
+int metrics_init(void);
 
 /**
- * @brief Destroy metrics
- * 
- * @param m Pointer to metrics_t
+ * @brief Get the shared metrics area
+ *
+ * @return Pointer to the counters, or NULL before metrics_init()
  */
-void metrics_destroy(metrics_t *m);
+metrics_t *metrics_get(void);
+
+/** @brief Count an accepted connection (parent, at fork time) */
+void metrics_connection_opened(void);
+
+/** @brief Count a finished connection (async-signal-safe; SIGCHLD handler) */
+void metrics_connection_closed(void);
 
 /**
- * @brief Increment connection counter
- * 
- * Increments the total and active connection counters.
- * 
- * @param m Pointer to metrics_t structure.
+ * @brief Count a rejected client
+ * @param reason Why the client was turned away
  */
-void metrics_inc_connections(metrics_t *m);
+void metrics_rejected(metrics_reject_t reason);
+
+/** @brief Count a newly established WebSocket session */
+void metrics_ws_session_started(void);
 
 /**
- * @brief Decrement connection counter
- * 
- * Decrements the active connection counter.
- * 
- * @param m Pointer to metrics_t structure.
+ * @brief Count a finished WebSocket session
+ * @param seconds How long the session lasted
  */
-void metrics_dec_connections(metrics_t *m);
+void metrics_ws_session_ended(uint64_t seconds);
 
 /**
- * @brief Increment failed connection counter
- * 
- * Increments the failed connection counter.
- * 
- * @param m Pointer to metrics_t structure.
+ * @brief Count a message forwarded from a client to its target
+ * @param bytes Payload size
  */
-void metrics_inc_failed_connections(metrics_t *m);
+void metrics_add_to_target(uint64_t bytes);
 
 /**
- * @brief Increment data transfer sent
- * 
- * @param m Pointer to metrics_t
- * @param bytes Number of bytes to add
+ * @brief Count data forwarded from a target to its client
+ * @param bytes Payload size
  */
-void metrics_add_bytes_sent(metrics_t *m, uint64_t bytes);
+void metrics_add_to_client(uint64_t bytes);
 
 /**
- * @brief Increment data transfer received
- * 
- * @param m Pointer to metrics_t
- * @param bytes Number of bytes to add
+ * @brief Count an HTTP response
+ * @param status_code Status code that was sent
  */
-void metrics_add_bytes_received(metrics_t *m, uint64_t bytes);
+void metrics_http_response(int status_code);
 
 /**
- * @brief Increment frame counters sent
- * 
- * @param m Pointer to metrics_t
+ * @brief Count an authentication attempt that supplied credentials
+ * @param success Non-zero if the credentials were valid
  */
-void metrics_inc_frames_sent(metrics_t *m);
+void metrics_auth(int success);
 
 /**
- * @brief Increment frame counters received
- * 
- * @param m Pointer to metrics_t
+ * @brief Export all metrics in the Prometheus text exposition format
+ *
+ * @param buffer Output buffer
+ * @param buffer_size Size of the output buffer
+ * @return Number of bytes written, or -1 if the buffer is too small or
+ *         metrics are not initialized
  */
-void metrics_inc_frames_received(metrics_t *m);
-
-/**
- * @brief Increment HTTP counters
- * 
- * @param m Pointer to metrics_t
- * @param status_code HTTP status code
- */
-void metrics_inc_http_request(metrics_t *m, int status_code);
-
-/**
- * @brief Increment authentication counters success
- * 
- * @param m Pointer to metrics_t
- */
-void metrics_inc_auth_success(metrics_t *m);
-
-/**
- * @brief Increment authentication counters failure
- * 
- * @param m Pointer to metrics_t
- */
-void metrics_inc_auth_failure(metrics_t *m);
-
-/**
- * @brief Record handshake time
- * 
- * @param m Pointer to metrics_t
- * @param microseconds Time spent in handshake (in microseconds)
- */
-void metrics_record_handshake_time(metrics_t *m, uint64_t microseconds);
-
-/**
- * @brief Export metrics in Prometheus format
- * 
- * Exports the current metrics in Prometheus text format.
- * 
- * @param m Pointer to metrics_t structure.
- * @param buffer Output buffer to write the metrics.
- * @param buffer_size Size of the output buffer.
- * @return Number of bytes written to the buffer.
- */
-ssize_t metrics_export_prometheus(metrics_t *m, char *buffer, size_t buffer_size);
-
-/**
- * @brief Export metrics in JSON format
- * 
- * Exports the current metrics in JSON format.
- * 
- * @param m Pointer to metrics_t structure.
- * @param buffer Output buffer to write the metrics.
- * @param buffer_size Size of the output buffer.
- * @return Number of bytes written to the buffer.
- */
-ssize_t metrics_export_json(metrics_t *m, char *buffer, size_t buffer_size);
-
-/**
- * @brief Get current uptime
- * 
- * Calculates and returns the current uptime of the server in seconds.
- * 
- * @param m Pointer to metrics_t structure.
- * @return Server uptime in seconds.
- */
-uint32_t metrics_get_uptime(metrics_t *m);
+ssize_t metrics_export_prometheus(char *buffer, size_t buffer_size);
 
 #endif /* WS2SOCKET_METRICS_H */

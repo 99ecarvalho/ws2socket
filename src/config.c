@@ -157,6 +157,10 @@ int config_init_defaults(app_config_t *config)
     config->logging.targets = LOG_TARGET_CONSOLE;
     config->logging.syslog_facility = 16;  /* LOG_LOCAL0 */
 
+    /* Authentication and metrics defaults (both off) */
+    strlcpy(config->auth_realm, "ws2socket", sizeof(config->auth_realm));
+    config->metrics_enabled = 0;
+
     /* Application defaults */
     config->token_auth = 0;
     config->allow_any_target = 0;
@@ -212,6 +216,14 @@ int config_parse_args(int argc, char *argv[], app_config_t *config)
                 log_error("Invalid target '%s' (expected HOST:PORT)", argv[i]);
                 return WS_EINVAL;
             }
+        } else if (strcmp(arg, "--auth-file") == 0) {
+            if (++i >= argc) {
+                log_error("Missing argument for %s", arg);
+                return WS_EINVAL;
+            }
+            strlcpy(config->auth_file, argv[i], sizeof(config->auth_file));
+        } else if (strcmp(arg, "--metrics") == 0) {
+            config->metrics_enabled = 1;
         } else if (strcmp(arg, "--token-file") == 0) {
             if (++i >= argc) {
                 log_error("Missing argument for %s", arg);
@@ -384,6 +396,23 @@ int config_load_file(const char *filename, app_config_t *config)
                 bad_value = config->server.socket_timeout < 0;
             } else if (strcmp(key, "web_root") == 0) {
                 strlcpy(config->web_root, value, sizeof(config->web_root));
+            } else if (strcmp(key, "auth_file") == 0) {
+                strlcpy(config->auth_file, value, sizeof(config->auth_file));
+            } else if (strcmp(key, "auth_realm") == 0) {
+                /* Printable ASCII without quotes or backslashes, so it can
+                 * be placed in a quoted header value */
+                bad_value = value[0] == '\0' ||
+                            strlen(value) >= sizeof(config->auth_realm);
+                for (const char *c = value; *c && !bad_value; c++) {
+                    bad_value = *c < 0x20 || *c > 0x7E || *c == '"' || *c == '\\';
+                }
+                if (!bad_value) {
+                    strlcpy(config->auth_realm, value, sizeof(config->auth_realm));
+                }
+            } else if (strcmp(key, "metrics") == 0) {
+                int enabled = parse_bool(value);
+                bad_value = enabled < 0;
+                if (enabled >= 0) config->metrics_enabled = enabled;
             }
         } else if (strcmp(section, "proxy") == 0) {
             if (strcmp(key, "target") == 0) {
@@ -490,6 +519,8 @@ void config_print(const app_config_t *config)
         log_info("Target: %s:%u", config->target_host, config->target_port);
     }
     log_info("Max Connections: %d", config->server.max_connections);
+    log_info("Authentication: %s", config->auth_file[0] ? config->auth_file : "none");
+    log_info("Metrics: %s", config->metrics_enabled ? "/metrics" : "disabled");
     log_info("Verbose: %s", config->server.verbose ? "yes" : "no");
     log_info("======================");
 }
@@ -507,6 +538,8 @@ void config_print_usage(const char *program_name)
     printf("  -p, --port PORT           Listen port (default: 6080)\n");
     printf("  -t, --target HOST:PORT    Target TCP server\n");
     printf("  --token-file FILE         Choose the target per client from a token file\n");
+    printf("  --auth-file FILE          Require HTTP Basic authentication (htpasswd file)\n");
+    printf("  --metrics                 Serve Prometheus metrics at /metrics\n");
     printf("  -c, --cert FILE           TLS certificate file (PEM), enables wss://\n");
     printf("  -k, --key FILE            TLS private key file (PEM)\n");
     printf("  -v, --verbose             Verbose output\n");
@@ -526,7 +559,7 @@ void config_print_usage(const char *program_name)
  */
 void config_print_version(void)
 {
-    printf("ws2socket version 0.1.0\n");
+    printf("ws2socket version %s\n", WS2SOCKET_VERSION);
     printf("WebSocket to TCP Socket Proxy\n");
     printf("Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>\n");
     printf("License: LGPL-3.0-or-later <https://www.gnu.org/licenses/lgpl-3.0.html>\n");

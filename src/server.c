@@ -14,6 +14,7 @@
 
 #include "server.h"
 #include "logging.h"
+#include "metrics.h"
 #include "utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,7 @@ static void sigchld_handler(int sig)
         if (g_active_children > 0) {
             g_active_children--;
         }
+        metrics_connection_closed();
     }
     errno = saved_errno;
 }
@@ -63,6 +65,7 @@ static SSL *server_tls_handshake(ws_server_t *server, int client_fd)
     int ssl_ret = SSL_accept(ssl);
     if (ssl_ret <= 0) {
         log_warn("TLS handshake failed: error %d", SSL_get_error(ssl, ssl_ret));
+        metrics_rejected(METRIC_REJECT_TLS);
         SSL_free(ssl);
         return NULL;
     }
@@ -284,47 +287,57 @@ int server_accept_client(ws_server_t *server, int *client_fd,
  */
 int server_recv_request(int client_fd, SSL *ssl, http_request_t *req)
 {
+    /* Bytes read past the end of the previous request's headers, kept for
+     * the next request on a keep-alive connection. One connection per
+     * process, so a static buffer is enough. */
+    static char buffer[16384];
+    static size_t buffered = 0;
+
+    extern int http_parse_request(const char *request_data, size_t request_len,
+                                 http_request_t *request_out);
+
     if (!req) {
         return WS_EINVAL;
     }
-    
-    // Declare function from http_server.c
-    extern int http_parse_request(const char *request_data, size_t request_len,
-                                 http_request_t *request_out);
-    
-    // Read HTTP request
-    char buffer[16384];
-    ssize_t total = 0;
-    ssize_t n;
-    
-    // Read until we get \r\n\r\n (end of headers)
-    while (total < (ssize_t)sizeof(buffer) - 1) {
-        n = io_recv(client_fd, ssl, (uint8_t *)buffer + total, sizeof(buffer) - total - 1);
-        if (n <= 0) {
-            if (n == 0) {
-                log_debug("Client closed connection during request");
-            } else {
-                log_error("Failed to read HTTP request: %s", strerror(errno));
-            }
-            return WS_ESOCKET;
-        }
-        
-        total += n;
-        buffer[total] = '\0';
-        
-        // Check if we have complete headers
-        if (strstr(buffer, "\r\n\r\n")) {
+    req->error_status = 0;
+
+    char *end = NULL;
+    for (;;) {
+        buffer[buffered] = '\0';
+        end = strstr(buffer, "\r\n\r\n");
+        if (end) {
             break;
         }
+        if (buffered >= sizeof(buffer) - 1) {
+            log_warn("HTTP request headers too large");
+            req->error_status = 431;
+            return WS_EPROTO;
+        }
+
+        ssize_t n = io_recv(client_fd, ssl, (uint8_t *)buffer + buffered,
+                            sizeof(buffer) - 1 - buffered);
+        if (n <= 0) {
+            if (n == 0 || buffered == 0) {
+                log_debug("Client closed connection or timed out waiting for a request");
+            } else {
+                log_warn("Incomplete HTTP request: %s", strerror(errno));
+            }
+            buffered = 0;
+            return WS_ESOCKET;
+        }
+        buffered += (size_t)n;
     }
-    
-    if (total == 0) {
-        return WS_EPROTO;
-    }
-    
-    // Parse the request
-    if (http_parse_request(buffer, total, req) < 0) {
-        log_error("Failed to parse HTTP request");
+
+    size_t request_len = (size_t)(end - buffer) + 4;
+
+    int parsed = http_parse_request(buffer, request_len, req);
+
+    /* Keep whatever follows the headers for the next call */
+    memmove(buffer, buffer + request_len, buffered - request_len);
+    buffered -= request_len;
+
+    if (parsed < 0) {
+        log_warn("Malformed HTTP request (%d)", req->error_status);
         return WS_EPROTO;
     }
     
@@ -432,6 +445,7 @@ int server_run(ws_server_t *server, client_handler_t handler)
             g_active_children >= server->config.max_connections) {
             log_warn("Connection limit (%d) reached, rejecting client",
                      server->config.max_connections);
+            metrics_rejected(METRIC_REJECT_LIMIT);
             if (!server->ssl_ctx) {
                 socket_set_timeout(client_fd, 1);
                 http_send_status(client_fd, NULL, 503, "Service Unavailable");
@@ -447,6 +461,7 @@ int server_run(ws_server_t *server, client_handler_t handler)
         if (pid > 0) {
             g_active_children++;
             server->num_connections = g_active_children;
+            metrics_connection_opened();
         }
         sigprocmask(SIG_UNBLOCK, &chld_set, NULL);
         

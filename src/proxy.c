@@ -17,6 +17,7 @@
 #include "proxy.h"
 #include "conn_pool.h"
 #include "logging.h"
+#include "metrics.h"
 #include "utils.h"
 #include <stdlib.h>
 #include <string.h>
@@ -347,6 +348,7 @@ ssize_t proxy_forward_ws_to_tcp(proxy_client_t *client)
 
     // Track uncompressed bytes (after decompression)
     client->bytes_received += received;
+    metrics_add_to_target((uint64_t)received);
     // Note: compressed size is tracked inside websocket_recv via ws->bytes_received_wire
     log_debug("[Client %u] WS->TCP: forwarded %zd bytes", client->client_id, sent);
     
@@ -386,6 +388,7 @@ ssize_t proxy_forward_tcp_to_ws(proxy_client_t *client)
 
     // Track uncompressed bytes (before compression)
     client->bytes_sent += sent;
+    metrics_add_to_client((uint64_t)sent);
     // Note: compressed size is tracked inside websocket_send via ws->bytes_sent_wire
     log_debug("[Client %u] TCP->WS: forwarded %zd bytes", client->client_id, sent);
     

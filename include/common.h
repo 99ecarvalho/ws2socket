@@ -60,6 +60,11 @@
  * @{
  */
 
+/** Program version (normally set by the build system from CMakeLists.txt) */
+#ifndef WS2SOCKET_VERSION
+#define WS2SOCKET_VERSION "0.1.0"
+#endif
+
 /** Maximum buffer size for frames */
 #define MAX_FRAME_SIZE 65536
 

@@ -230,48 +230,52 @@ ssize_t base64_encode(const uint8_t *data, size_t data_len,
 ssize_t base64_decode(const char *encoded, uint8_t *data_out,
                      size_t data_out_size)
 {
-    size_t i = 0;
-    size_t j = 0;
-    uint32_t sextet_a, sextet_b, sextet_c, sextet_d;
-    uint32_t triple;
+    size_t len, i, j = 0;
 
-    if (!encoded || !data_out || data_out_size == 0) {
+    if (!encoded || !data_out) {
         return -1;
     }
 
-    while (i < strlen(encoded) && j < data_out_size) {
-        /* Get sextets */
-        sextet_a = strchr(base64_chars, encoded[i]) ? 
-                   strchr(base64_chars, encoded[i]) - base64_chars : 0;
-        i++;
-        if (i >= strlen(encoded)) return -1;
+    /* Strict RFC 4648 decoding: length a multiple of 4, standard alphabet,
+     * '=' only as trailing padding. Input may come from the network. */
+    len = strlen(encoded);
+    if (len % 4 != 0) {
+        return -1;
+    }
 
-        sextet_b = strchr(base64_chars, encoded[i]) ?
-                   strchr(base64_chars, encoded[i]) - base64_chars : 0;
-        i++;
+    for (i = 0; i < len; i += 4) {
+        uint32_t triple = 0;
+        int padding = 0;
 
-        sextet_c = encoded[i] == '=' ? 0 :
-                   strchr(base64_chars, encoded[i]) ?
-                   strchr(base64_chars, encoded[i]) - base64_chars : 0;
-        i++;
+        for (int k = 0; k < 4; k++) {
+            char c = encoded[i + k];
+            uint32_t v;
 
-        sextet_d = encoded[i] == '=' ? 0 :
-                   strchr(base64_chars, encoded[i]) ?
-                   strchr(base64_chars, encoded[i]) - base64_chars : 0;
-        i++;
-
-        triple = (sextet_a << 18) | (sextet_b << 12) |
-                 (sextet_c << 6) | sextet_d;
-
-        if (j < data_out_size) {
-            data_out[j++] = (triple >> 16) & 0xFF;
+            if (c == '=') {
+                /* Padding only in the last group, only in the last two
+                 * positions, and never followed by data */
+                if (i + 4 != len || k < 2) {
+                    return -1;
+                }
+                padding++;
+                v = 0;
+            } else {
+                const char *p = (c != '\0') ? strchr(base64_chars, c) : NULL;
+                if (!p || padding) {
+                    return -1;
+                }
+                v = (uint32_t)(p - base64_chars);
+            }
+            triple = (triple << 6) | v;
         }
-        if (encoded[i - 2] != '=' && j < data_out_size) {
-            data_out[j++] = (triple >> 8) & 0xFF;
+
+        size_t out = 3 - (size_t)padding;
+        if (j + out > data_out_size) {
+            return -1;
         }
-        if (encoded[i - 1] != '=' && j < data_out_size) {
-            data_out[j++] = triple & 0xFF;
-        }
+        data_out[j++] = (triple >> 16) & 0xFF;
+        if (out > 1) data_out[j++] = (triple >> 8) & 0xFF;
+        if (out > 2) data_out[j++] = triple & 0xFF;
     }
 
     return (ssize_t)j;

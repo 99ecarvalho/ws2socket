@@ -24,6 +24,7 @@ set(SOURCES
     src/token_auth.c
     src/conn_pool.c
     src/metrics.c
+    src/auth.c
     src/ws2socket.c
 )
 
@@ -45,6 +46,20 @@ target_include_directories(ws2socket
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${OPENSSL_INCLUDE_DIR}
 )
+
+# Optional: password hashing for HTTP Basic authentication (--auth-file)
+find_library(CRYPT_LIBRARY NAMES crypt)
+find_path(CRYPT_INCLUDE_DIR NAMES crypt.h)
+if(CRYPT_LIBRARY AND CRYPT_INCLUDE_DIR)
+    target_compile_definitions(ws2socket PRIVATE WS2SOCKET_HAVE_CRYPT=1)
+    target_link_libraries(ws2socket PRIVATE ${CRYPT_LIBRARY})
+    message(STATUS "HTTP authentication: enabled (${CRYPT_LIBRARY})")
+else()
+    message(STATUS "HTTP authentication: disabled (libcrypt not found)")
+endif()
+
+# Single source for the version string
+target_compile_definitions(ws2socket PRIVATE WS2SOCKET_VERSION="${PROJECT_VERSION}")
 
 # Compiler flags for better warnings
 if(UNIX AND NOT APPLE)
